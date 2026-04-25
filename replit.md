@@ -12,6 +12,7 @@
 - **TypeScript version**: 5.9
 - **Mobile**: Expo (React Native) with Expo Router
 - **Backend**: Python FastAPI v0.111.0 + SQLite
+- **AI**: Gemini 2.5 Flash via Replit AI Integrations (env: AI_INTEGRATIONS_GEMINI_BASE_URL, AI_INTEGRATIONS_GEMINI_API_KEY)
 - **State management**: React Query (@tanstack/react-query)
 
 ## Artifacts

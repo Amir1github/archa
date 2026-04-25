@@ -19,6 +19,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from typing import Optional, List, Dict, Any
 import json, os, asyncio, aiohttp, sqlite3, logging, hashlib, hmac
+from google import genai as google_genai
+from google.genai import types as genai_types
 from datetime import datetime, date, timedelta
 from contextlib import asynccontextmanager
 
@@ -1092,6 +1094,131 @@ def sync_status():
         "onec_url":        ONEC_URL[:30] + "..." if len(ONEC_URL) > 30 else ONEC_URL,
         "sync_interval":   SYNC_INTERVAL,
     }
+
+# ══════════════════════════════════════════════════════════════════════
+# AI АГЕНТ — GEMINI 2.5 FLASH
+# ══════════════════════════════════════════════════════════════════════
+
+class AiMessage(BaseModel):
+    role: str  # "user" | "assistant"
+    content: str
+
+class AiChatRequest(BaseModel):
+    messages: List[AiMessage]
+
+def _build_company_context(db) -> str:
+    """Собирает актуальные данные компании для системного промпта AI."""
+    today = date.today().isoformat()
+
+    # Сотрудники
+    employees = db.execute("SELECT id, name, role, salary FROM employees").fetchall()
+    emp_lines = "\n".join(f"  - {e['name']} ({e['role']}, зарплата: {e['salary']} тыс. сум)" for e in employees)
+
+    # Задачи
+    tasks = db.execute("SELECT t.name, t.status, t.priority, t.due_date, e.name as assignee FROM tasks t LEFT JOIN employees e ON t.emp_id = e.id").fetchall()
+    overdue_statuses = {"Просрочена", "overdue"}
+    task_lines = "\n".join(f"  - [{t['status'].upper()}] {t['name']} → {t['assignee'] or 'не назначен'} (приоритет: {t['priority']}, срок: {t['due_date'] or 'нет'})" for t in tasks[:15])
+    overdue_tasks = [t for t in tasks if t['status'] in overdue_statuses]
+
+    # Дебиторы
+    debtors = db.execute("SELECT d.name, d.debt, d.overdue_days, d.status, e.name as manager FROM debtors d LEFT JOIN employees e ON d.manager_id = e.id WHERE d.status NOT IN ('paid', 'closed')").fetchall()
+    debt_total = sum(d['debt'] for d in debtors)
+    critical_debtors = [d for d in debtors if d['overdue_days'] > 90]
+    debtor_lines = "\n".join(f"  - {d['name']}: {d['debt']} млн сум, {d['overdue_days']} дн. просрочки, статус: {d['status']}, менеджер: {d['manager'] or '—'}" for d in sorted(debtors, key=lambda x: -x['debt'])[:10])
+
+    # Склад
+    warehouse = db.execute("SELECT name, qty, min_qty, category FROM warehouse").fetchall()
+    out_of_stock = [w for w in warehouse if w['qty'] == 0]
+    low_stock = [w for w in warehouse if 0 < w['qty'] <= w['min_qty']]
+    wh_lines = "\n".join(f"  - {w['name']} ({w['category']}): {w['qty']} ед. (мин: {w['min_qty']})" for w in out_of_stock + low_stock)
+
+    # Посещаемость сегодня
+    att = db.execute("SELECT a.status, e.name FROM attendance a JOIN employees e ON a.emp_id = e.id WHERE a.date = ?", (today,)).fetchall()
+    present = [a for a in att if a['status'] in ('present', 'late')]
+    att_lines = f"  На работе сегодня ({today}): {len(present)}/{len(employees)}"
+
+    # Продажи
+    plans = db.execute("SELECT manager_id, period, amount FROM sales_plans WHERE period LIKE '2026-%' AND LENGTH(period) = 7").fetchall()
+    facts = db.execute("SELECT manager_id, period, amount FROM sales_facts WHERE period LIKE '2026-%'").fetchall()
+    total_plan = sum(p['amount'] for p in plans)
+    total_fact = sum(f['amount'] for f in facts)
+    sales_pct = round((total_fact / total_plan * 100) if total_plan > 0 else 0)
+
+    return f"""Ты — AI-Агент корпоративной системы "Пойтахт" (Душанбе, Таджикистан).
+У тебя есть полный доступ к актуальным данным компании. Отвечай на русском языке, кратко и по делу. Используй конкретные цифры из данных.
+
+=== ДАННЫЕ КОМПАНИИ (обновлено: {today}) ===
+
+📋 СОТРУДНИКИ ({len(employees)} чел.):
+{emp_lines}
+
+✅ ЗАДАЧИ ({len(tasks)} всего, {len(overdue_tasks)} просрочено):
+{task_lines}
+
+💰 ДЕБИТОРЫ ({len(debtors)} активных, общий долг: {debt_total:.1f} млн сум, критических: {len(critical_debtors)}):
+{debtor_lines}
+
+📦 СКЛАД (нет в наличии: {len(out_of_stock)}, заканчивается: {len(low_stock)}):
+{wh_lines if wh_lines else '  Все позиции в норме'}
+
+🕐 ПОСЕЩАЕМОСТЬ:
+{att_lines}
+
+📈 ПРОДАЖИ 2026 (план: {total_plan:.0f} млн, факт: {total_fact:.0f} млн, выполнение: {sales_pct}%):
+  {"✅ Выполнение в норме" if sales_pct >= 80 else f"⚠️ Выполнение ниже нормы ({sales_pct}%)"}
+
+=== КОНЕЦ ДАННЫХ ===
+
+Отвечай чётко, с конкретными цифрами. Если нужно давай рекомендации на основе данных."""
+
+def _get_gemini_client():
+    base_url = os.environ.get("AI_INTEGRATIONS_GEMINI_BASE_URL", "")
+    api_key = os.environ.get("AI_INTEGRATIONS_GEMINI_API_KEY", "")
+    if not base_url or not api_key:
+        raise HTTPException(503, "AI интеграция не настроена")
+    client = google_genai.Client(
+        api_key=api_key,
+        http_options={"base_url": base_url, "api_version": ""}
+    )
+    return client
+
+@app.post("/api/ai-chat", tags=["ai"])
+async def ai_chat_endpoint(req: AiChatRequest):
+    """AI-чат с Gemini 2.5 Flash, имеет доступ ко всем данным компании"""
+    db = get_db()
+    try:
+        system_prompt = _build_company_context(db)
+        client = _get_gemini_client()
+
+        # Конвертируем историю сообщений
+        contents = []
+        for msg in req.messages:
+            role = "model" if msg.role == "assistant" else "user"
+            contents.append(genai_types.Content(
+                role=role,
+                parts=[genai_types.Part(text=msg.content)]
+            ))
+
+        response = await asyncio.to_thread(
+            client.models.generate_content,
+            model="gemini-2.5-flash",
+            contents=contents,
+            config=genai_types.GenerateContentConfig(
+                system_instruction=system_prompt,
+                max_output_tokens=8192,
+                temperature=0.7,
+            )
+        )
+
+        answer = response.text or "Не удалось получить ответ."
+        return {"response": answer, "model": "gemini-2.5-flash"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.error(f"AI chat error: {e}")
+        raise HTTPException(500, f"Ошибка AI: {str(e)}")
+    finally:
+        db.close()
 
 # ══════════════════════════════════════════════════════════════════════
 # СЛУЖЕБНЫЕ ЭНДПОИНТЫ
