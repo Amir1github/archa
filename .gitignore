@@ -2,6 +2,9 @@
 
 # compiled output
 dist
+# Exception: mobile web build is tracked for zero-downtime deployment
+!artifacts/mobile/dist
+!artifacts/mobile/dist/**
 tmp
 out-tsc
 *.tsbuildinfo

@@ -5,8 +5,8 @@ node_modules/
 
 # Expo
 .expo/
-dist/
 web-build/
+# dist/ is intentionally tracked — needed for production deployment
 expo-env.d.ts
 
 # Native
