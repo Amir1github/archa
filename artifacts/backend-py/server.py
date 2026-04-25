@@ -804,6 +804,34 @@ def get_warehouse(
     db.close()
     return rows
 
+class WarehousePhotoBody(BaseModel):
+    photo: str  # base64 data URL (e.g. "data:image/jpeg;base64,...")
+
+@app.put("/api/warehouse/{item_id}/photo", tags=["warehouse"])
+def update_warehouse_photo(item_id: str, body: WarehousePhotoBody):
+    """Загрузить или обновить фото товара (base64 data URL)"""
+    db = get_db()
+    row = db.execute("SELECT id FROM warehouse WHERE id=?", (item_id,)).fetchone()
+    if not row:
+        db.close()
+        raise HTTPException(404, "Товар не найден")
+    db.execute(
+        "UPDATE warehouse SET photo=?, updated_at=datetime('now') WHERE id=?",
+        (body.photo, item_id)
+    )
+    db.commit()
+    db.close()
+    return {"ok": True}
+
+@app.delete("/api/warehouse/{item_id}/photo", tags=["warehouse"])
+def delete_warehouse_photo(item_id: str):
+    """Удалить фото товара"""
+    db = get_db()
+    db.execute("UPDATE warehouse SET photo='', updated_at=datetime('now') WHERE id=?", (item_id,))
+    db.commit()
+    db.close()
+    return {"ok": True}
+
 @app.get("/api/warehouse/suppliers", tags=["warehouse"])
 def get_suppliers():
     db = get_db()

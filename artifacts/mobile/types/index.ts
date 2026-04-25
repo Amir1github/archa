@@ -86,6 +86,7 @@ export interface WarehouseItem {
   last_in: string;
   source: string;
   updated_at: string;
+  photo?: string;
 }
 
 export interface SalesFact {
