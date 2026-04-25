@@ -17,6 +17,101 @@ import type { WarehouseItem } from "@/types";
 
 const { width: SCREEN_W, height: SCREEN_H } = Dimensions.get("window");
 
+// ─── Загрузка фото через FileReader (веб) или ImagePicker (нативный) ─────────
+async function uploadPhotoDataUrl(
+  dataUrl: string,
+  itemId: string,
+  setUploading: (v: boolean) => void,
+  setPreviewUri: (v: string) => void,
+  onUpdated: () => void,
+) {
+  setUploading(true);
+  try {
+    await apiPut(`/api/warehouse/${itemId}/photo`, { photo: dataUrl });
+    setPreviewUri(dataUrl);
+    onUpdated();
+  } catch (e: any) {
+    Alert.alert("Ошибка", "Не удалось загрузить фото: " + (e?.message || ""));
+  } finally {
+    setUploading(false);
+  }
+}
+
+// Открывает нативный file input на вебе
+function openWebFilePicker(
+  itemId: string,
+  setUploading: (v: boolean) => void,
+  setPreviewUri: (v: string) => void,
+  onUpdated: () => void,
+) {
+  const input = document.createElement("input");
+  input.type = "file";
+  input.accept = "image/*";
+  input.style.display = "none";
+  document.body.appendChild(input);
+  input.onchange = () => {
+    const file = input.files?.[0];
+    document.body.removeChild(input);
+    if (!file) return;
+    setUploading(true);
+    const reader = new FileReader();
+    reader.onload = async (e) => {
+      const dataUrl = e.target?.result as string;
+      if (!dataUrl) { setUploading(false); return; }
+      await uploadPhotoDataUrl(dataUrl, itemId, setUploading, setPreviewUri, onUpdated);
+    };
+    reader.onerror = () => {
+      setUploading(false);
+      Alert.alert("Ошибка", "Не удалось прочитать файл");
+    };
+    reader.readAsDataURL(file);
+  };
+  input.oncancel = () => document.body.removeChild(input);
+  input.click();
+}
+
+// Открывает ImagePicker на нативном
+async function openNativePicker(
+  fromCamera: boolean,
+  itemId: string,
+  setUploading: (v: boolean) => void,
+  setPreviewUri: (v: string) => void,
+  onUpdated: () => void,
+) {
+  const perm = fromCamera
+    ? await ImagePicker.requestCameraPermissionsAsync()
+    : await ImagePicker.requestMediaLibraryPermissionsAsync();
+  if (perm.status !== "granted") {
+    Alert.alert("Нет доступа", fromCamera ? "Разрешите доступ к камере" : "Разрешите доступ к галерее");
+    return;
+  }
+  const opts: ImagePicker.ImagePickerOptions = { base64: true, quality: 0.45, allowsEditing: true, aspect: [4, 3], mediaTypes: "images" as any };
+  const result = fromCamera
+    ? await ImagePicker.launchCameraAsync(opts)
+    : await ImagePicker.launchImageLibraryAsync(opts);
+
+  if (result.canceled || !result.assets?.[0]) return;
+  const asset = result.assets[0];
+
+  let dataUrl: string | null = null;
+  if (asset.base64) {
+    dataUrl = `data:${asset.mimeType || "image/jpeg"};base64,${asset.base64}`;
+  } else if (asset.uri) {
+    try {
+      const resp = await fetch(asset.uri);
+      const blob = await resp.blob();
+      dataUrl = await new Promise<string>((res, rej) => {
+        const r = new FileReader();
+        r.onload = () => res(r.result as string);
+        r.onerror = rej;
+        r.readAsDataURL(blob);
+      });
+    } catch { /* ignore */ }
+  }
+  if (!dataUrl) { Alert.alert("Ошибка", "Не удалось получить данные фото"); return; }
+  await uploadPhotoDataUrl(dataUrl, itemId, setUploading, setPreviewUri, onUpdated);
+}
+
 // ─── Photo Picker Modal ───────────────────────────────────────────────────────
 function PhotoModal({
   item, visible, onClose, onUpdated,
@@ -31,109 +126,41 @@ function PhotoModal({
   const [uploading, setUploading] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [previewUri, setPreviewUri] = useState<string | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState(false);
 
   if (!item) return null;
   const hasPhoto = !!(previewUri || item.photo);
   const displayUri = previewUri || item.photo || null;
 
-  async function pickImage(fromCamera: boolean) {
-    // На мобильных запрашиваем разрешения, на вебе браузер сам управляет
-    if (Platform.OS !== "web") {
-      const perm = fromCamera
-        ? await ImagePicker.requestCameraPermissionsAsync()
-        : await ImagePicker.requestMediaLibraryPermissionsAsync();
-      if (perm.status !== "granted") {
-        Alert.alert("Нет доступа", fromCamera ? "Разрешите доступ к камере" : "Разрешите доступ к галерее");
-        return;
-      }
-    }
-
-    const pickerOptions: ImagePicker.ImagePickerOptions = {
-      base64: true,
-      quality: 0.4,      // Сжимаем для прохождения через прокси (<1MB)
-      allowsEditing: true,
-      aspect: [4, 3],
-      mediaTypes: "images" as any,
-    };
-    const result = fromCamera
-      ? await ImagePicker.launchCameraAsync(pickerOptions)
-      : await ImagePicker.launchImageLibraryAsync(pickerOptions);
-
-    if (result.canceled || !result.assets?.[0]) return;
-    const asset = result.assets[0];
-
-    // Определяем data URL: в вебе asset.uri уже data URL, на нативе используем base64
-    let photoDataUrl: string;
-    if (asset.uri?.startsWith("data:")) {
-      // Веб-режим: uri уже является data URL
-      photoDataUrl = asset.uri;
-    } else if (asset.base64) {
-      // Нативный режим: конструируем data URL из base64
-      const mimeType = asset.mimeType || "image/jpeg";
-      photoDataUrl = `data:${mimeType};base64,${asset.base64}`;
-    } else if (asset.uri) {
-      // Запасной вариант: конвертируем blob/file URI в base64 через fetch
-      try {
-        const resp = await fetch(asset.uri);
-        const blob = await resp.blob();
-        const reader = new FileReader();
-        photoDataUrl = await new Promise<string>((resolve, reject) => {
-          reader.onload = () => resolve(reader.result as string);
-          reader.onerror = reject;
-          reader.readAsDataURL(blob);
-        });
-      } catch {
-        Alert.alert("Ошибка", "Не удалось прочитать фото");
-        return;
-      }
+  function handleAddPhoto() {
+    if (Platform.OS === "web") {
+      openWebFilePicker(item.id, setUploading, (uri) => setPreviewUri(uri), onUpdated);
     } else {
-      Alert.alert("Ошибка", "Не удалось получить данные фото");
-      return;
+      Alert.alert("Добавить фото", "Выберите источник", [
+        { text: "Камера", onPress: () => openNativePicker(true, item.id, setUploading, (u) => setPreviewUri(u), onUpdated) },
+        { text: "Галерея", onPress: () => openNativePicker(false, item.id, setUploading, (u) => setPreviewUri(u), onUpdated) },
+        { text: "Отмена", style: "cancel" },
+      ]);
     }
+  }
 
-    setUploading(true);
+  async function handleDeletePhoto() {
+    setDeleting(true);
+    setConfirmDelete(false);
     try {
-      await apiPut(`/api/warehouse/${item.id}/photo`, { photo: photoDataUrl });
-      setPreviewUri(photoDataUrl);
+      await apiDelete(`/api/warehouse/${item.id}/photo`);
+      setPreviewUri(null);
       onUpdated();
-    } catch (e: any) {
-      Alert.alert("Ошибка загрузки", e?.message || "Не удалось загрузить фото на сервер");
+    } catch {
+      Alert.alert("Ошибка", "Не удалось удалить фото");
     } finally {
-      setUploading(false);
+      setDeleting(false);
     }
-  }
-
-  function showPickerMenu() {
-    Alert.alert("Добавить фото", "Выберите источник", [
-      { text: "Камера", onPress: () => pickImage(true) },
-      { text: "Галерея", onPress: () => pickImage(false) },
-      { text: "Отмена", style: "cancel" },
-    ]);
-  }
-
-  async function deletePhoto() {
-    Alert.alert("Удалить фото", "Вы уверены?", [
-      { text: "Отмена", style: "cancel" },
-      {
-        text: "Удалить", style: "destructive",
-        onPress: async () => {
-          setDeleting(true);
-          try {
-            await apiDelete(`/api/warehouse/${item.id}/photo`);
-            setPreviewUri(null);
-            onUpdated();
-          } catch {
-            Alert.alert("Ошибка", "Не удалось удалить фото");
-          } finally {
-            setDeleting(false);
-          }
-        },
-      },
-    ]);
   }
 
   function handleClose() {
     setPreviewUri(null);
+    setConfirmDelete(false);
     onClose();
   }
 
@@ -172,7 +199,7 @@ function PhotoModal({
             <View style={styles.photoPlaceholder}>
               <Feather name="image" size={56} color={colors.border} />
               <Text style={[styles.photoPlaceholderText, { color: colors.mutedForeground }]}>
-                Фото не добавлено
+                Нажмите кнопку ниже чтобы добавить фото
               </Text>
             </View>
           )}
@@ -189,27 +216,49 @@ function PhotoModal({
         {/* Action buttons */}
         <View style={styles.photoActions}>
           <TouchableOpacity
-            onPress={showPickerMenu}
+            onPress={handleAddPhoto}
             disabled={uploading || deleting}
-            style={[styles.photoActionBtn, { backgroundColor: colors.primary, borderRadius: colors.radius, flex: 1 }]}
+            style={[styles.photoActionBtn, {
+              backgroundColor: uploading ? colors.border : colors.primary,
+              borderRadius: colors.radius, flex: 1,
+            }]}
           >
-            <Feather name="camera" size={18} color="#fff" />
-            <Text style={styles.photoActionBtnText}>{hasPhoto ? "Изменить фото" : "Добавить фото"}</Text>
+            {uploading
+              ? <ActivityIndicator size="small" color="#fff" />
+              : <Feather name="upload" size={18} color="#fff" />
+            }
+            <Text style={styles.photoActionBtnText}>
+              {uploading ? "Загрузка..." : hasPhoto ? "Изменить фото" : "Добавить фото"}
+            </Text>
           </TouchableOpacity>
-          {hasPhoto && (
+          {hasPhoto && !confirmDelete && (
             <TouchableOpacity
-              onPress={deletePhoto}
+              onPress={() => setConfirmDelete(true)}
               disabled={uploading || deleting}
               style={[styles.photoDeleteBtn, { backgroundColor: colors.danger + "15", borderRadius: colors.radius, borderColor: colors.danger + "40", borderWidth: 1 }]}
             >
               <Feather name="trash-2" size={18} color={colors.danger} />
             </TouchableOpacity>
           )}
+          {confirmDelete && (
+            <TouchableOpacity
+              onPress={handleDeletePhoto}
+              disabled={deleting}
+              style={[styles.photoDeleteBtn, { backgroundColor: colors.danger, borderRadius: colors.radius }]}
+            >
+              {deleting ? <ActivityIndicator size="small" color="#fff" /> : <Text style={{ color: "#fff", fontSize: 12, fontFamily: "Inter_600SemiBold" }}>Да</Text>}
+            </TouchableOpacity>
+          )}
         </View>
+        {confirmDelete && (
+          <TouchableOpacity onPress={() => setConfirmDelete(false)} style={{ alignItems: "center", paddingVertical: 6 }}>
+            <Text style={[{ fontSize: 13, fontFamily: "Inter_400Regular" }, { color: colors.mutedForeground }]}>Отмена удаления</Text>
+          </TouchableOpacity>
+        )}
 
         {/* Item details */}
         <View style={[styles.detailGrid, { borderColor: colors.border }]}>
-          <DetailRow label="Артикул" value={item.sku} colors={colors} />
+          <DetailRow label="Артикул" value={item.sku || "—"} colors={colors} />
           <DetailRow label="Категория" value={item.category} colors={colors} />
           <DetailRow label="Поставщик" value={item.supplier || "—"} colors={colors} />
           <DetailRow label="Склад" value={item.warehouse_name} colors={colors} />
