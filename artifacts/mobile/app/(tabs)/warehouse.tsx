@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from "react";
+import React, { useState, useCallback, useEffect } from "react";
 import {
   View, Text, ScrollView, StyleSheet, TouchableOpacity,
   ActivityIndicator, TextInput, RefreshControl, Platform,
@@ -37,29 +37,67 @@ function PhotoModal({
   const displayUri = previewUri || item.photo || null;
 
   async function pickImage(fromCamera: boolean) {
-    const perm = fromCamera
-      ? await ImagePicker.requestCameraPermissionsAsync()
-      : await ImagePicker.requestMediaLibraryPermissionsAsync();
-    if (perm.status !== "granted") {
-      Alert.alert("Нет доступа", fromCamera ? "Разрешите доступ к камере" : "Разрешите доступ к галерее");
-      return;
+    // На мобильных запрашиваем разрешения, на вебе браузер сам управляет
+    if (Platform.OS !== "web") {
+      const perm = fromCamera
+        ? await ImagePicker.requestCameraPermissionsAsync()
+        : await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (perm.status !== "granted") {
+        Alert.alert("Нет доступа", fromCamera ? "Разрешите доступ к камере" : "Разрешите доступ к галерее");
+        return;
+      }
     }
+
+    const pickerOptions: ImagePicker.ImagePickerOptions = {
+      base64: true,
+      quality: 0.4,      // Сжимаем для прохождения через прокси (<1MB)
+      allowsEditing: true,
+      aspect: [4, 3],
+      mediaTypes: "images" as any,
+    };
     const result = fromCamera
-      ? await ImagePicker.launchCameraAsync({ base64: true, quality: 0.65, allowsEditing: true, aspect: [4, 3] })
-      : await ImagePicker.launchImageLibraryAsync({ base64: true, quality: 0.65, allowsEditing: true, aspect: [4, 3], mediaTypes: "images" });
+      ? await ImagePicker.launchCameraAsync(pickerOptions)
+      : await ImagePicker.launchImageLibraryAsync(pickerOptions);
 
     if (result.canceled || !result.assets?.[0]) return;
     const asset = result.assets[0];
-    const mimeType = asset.mimeType || "image/jpeg";
-    const dataUrl = `data:${mimeType};base64,${asset.base64}`;
+
+    // Определяем data URL: в вебе asset.uri уже data URL, на нативе используем base64
+    let photoDataUrl: string;
+    if (asset.uri?.startsWith("data:")) {
+      // Веб-режим: uri уже является data URL
+      photoDataUrl = asset.uri;
+    } else if (asset.base64) {
+      // Нативный режим: конструируем data URL из base64
+      const mimeType = asset.mimeType || "image/jpeg";
+      photoDataUrl = `data:${mimeType};base64,${asset.base64}`;
+    } else if (asset.uri) {
+      // Запасной вариант: конвертируем blob/file URI в base64 через fetch
+      try {
+        const resp = await fetch(asset.uri);
+        const blob = await resp.blob();
+        const reader = new FileReader();
+        photoDataUrl = await new Promise<string>((resolve, reject) => {
+          reader.onload = () => resolve(reader.result as string);
+          reader.onerror = reject;
+          reader.readAsDataURL(blob);
+        });
+      } catch {
+        Alert.alert("Ошибка", "Не удалось прочитать фото");
+        return;
+      }
+    } else {
+      Alert.alert("Ошибка", "Не удалось получить данные фото");
+      return;
+    }
 
     setUploading(true);
     try {
-      await apiPut(`/api/warehouse/${item.id}/photo`, { photo: dataUrl });
-      setPreviewUri(dataUrl);
+      await apiPut(`/api/warehouse/${item.id}/photo`, { photo: photoDataUrl });
+      setPreviewUri(photoDataUrl);
       onUpdated();
-    } catch {
-      Alert.alert("Ошибка", "Не удалось загрузить фото");
+    } catch (e: any) {
+      Alert.alert("Ошибка загрузки", e?.message || "Не удалось загрузить фото на сервер");
     } finally {
       setUploading(false);
     }
@@ -436,6 +474,14 @@ export default function WarehouseScreen() {
   const handleUpdated = useCallback(() => {
     queryClient.invalidateQueries({ queryKey: ["warehouse"] });
   }, [queryClient]);
+
+  // Синхронизируем selectedItem при обновлении списка (например, после загрузки фото)
+  useEffect(() => {
+    if (selectedItem && items) {
+      const updated = items.find((i) => i.id === selectedItem.id);
+      if (updated) setSelectedItem(updated);
+    }
+  }, [items]);
 
   return (
     <View style={[styles.container, { backgroundColor: colors.background }]}>
