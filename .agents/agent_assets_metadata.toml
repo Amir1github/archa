@@ -1,0 +1,8 @@
+uploads = []
+outputs = []
+
+[[generated]]
+id = "N673a1_tHcjtPVRD_Qqh8"
+uri = "file://artifacts/mobile/assets/images/icon.png"
+type = "image"
+title = "poytakht app icon"

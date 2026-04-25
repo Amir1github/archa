@@ -1,8 +1,8 @@
-# Workspace
+# Пойтахт — Корпоративная система управления
 
 ## Overview
 
-pnpm workspace monorepo using TypeScript. Each package manages its own dependencies.
+Мобильное приложение "Пойтахт" — корпоративная система управления для компании из Душанбе, Таджикистан. Содержит Python FastAPI бекенд и Expo мобильное приложение.
 
 ## Stack
 
@@ -10,18 +10,57 @@ pnpm workspace monorepo using TypeScript. Each package manages its own dependenc
 - **Node.js version**: 24
 - **Package manager**: pnpm
 - **TypeScript version**: 5.9
-- **API framework**: Express 5
-- **Database**: PostgreSQL + Drizzle ORM
-- **Validation**: Zod (`zod/v4`), `drizzle-zod`
-- **API codegen**: Orval (from OpenAPI spec)
-- **Build**: esbuild (CJS bundle)
+- **Mobile**: Expo (React Native) with Expo Router
+- **Backend**: Python FastAPI v0.111.0 + SQLite
+- **State management**: React Query (@tanstack/react-query)
+
+## Artifacts
+
+- `artifacts/mobile` — Expo мобильное приложение (preview: `/`)
+- `artifacts/api-server` — Express Node.js API server (не используется активно, proxy routing)
+- `artifacts/backend-py` — Python FastAPI бекенд (Пойтахт API)
+
+## Backend (Python FastAPI)
+
+Файлы:
+- `artifacts/backend-py/server.py` — основной сервер с SQLite БД
+- `artifacts/backend-py/requirements.txt` — зависимости
+
+Порт: **8000** (маршрутизируется через proxy как `/api`)
+
+Запуск: Workflow `Poytakht Backend`
+
+API эндпоинты:
+- `GET /api/employees` — список сотрудников
+- `GET/POST /api/tasks` — задачи
+- `GET /api/attendance` — посещаемость
+- `GET /api/debtors` — дебиторы
+- `GET /api/warehouse` — склад
+- `GET /api/stats` — сводная статистика
+
+## Mobile App (Expo)
+
+Экраны:
+- **Главная** (`/(tabs)/index`) — дашборд со статистикой
+- **Задачи** (`/(tabs)/tasks`) — список с фильтрами, создание задач
+- **Табель** (`/(tabs)/attendance`) — посещаемость сотрудников
+- **Дебиторы** (`/(tabs)/debtors`) — управление дебиторской задолженностью
+- **Склад** (`/(tabs)/warehouse`) — складские остатки с тревогами
+- **Команда** (`/(tabs)/employees`) — список сотрудников
+- **Детали задачи** (`/task/[id]`) — изменение статуса, комментарии
+
+Цвета: зелёный #1a7a3c (primary), золотой #d4a017 (accent)
 
 ## Key Commands
 
-- `pnpm run typecheck` — full typecheck across all packages
-- `pnpm run build` — typecheck + build all packages
-- `pnpm --filter @workspace/api-spec run codegen` — regenerate API hooks and Zod schemas from OpenAPI spec
-- `pnpm --filter @workspace/db run push` — push DB schema changes (dev only)
-- `pnpm --filter @workspace/api-server run dev` — run API server locally
+- `pnpm run typecheck` — full typecheck
+- `pnpm run build` — build all packages
 
-See the `pnpm-workspace` skill for workspace structure, TypeScript setup, and package details.
+## Python Dependencies
+
+Установлены через uv в `.pythonlibs/`:
+- fastapi==0.111.0
+- uvicorn[standard]==0.29.0
+- aiohttp==3.9.5
+- aiofiles==23.2.1
+- python-multipart==0.0.9

@@ -1,0 +1,146 @@
+import { BlurView } from "expo-blur";
+import { isLiquidGlassAvailable } from "expo-glass-effect";
+import { Tabs } from "expo-router";
+import { Icon, Label, NativeTabs } from "expo-router/unstable-native-tabs";
+import { Feather } from "@expo/vector-icons";
+import React from "react";
+import { Platform, StyleSheet, View, useColorScheme } from "react-native";
+
+import { useColors } from "@/hooks/useColors";
+
+function NativeTabLayout() {
+  return (
+    <NativeTabs>
+      <NativeTabs.Trigger name="index">
+        <Icon sf={{ default: "house", selected: "house.fill" }} />
+        <Label>Главная</Label>
+      </NativeTabs.Trigger>
+      <NativeTabs.Trigger name="tasks">
+        <Icon sf={{ default: "checkmark.square", selected: "checkmark.square.fill" }} />
+        <Label>Задачи</Label>
+      </NativeTabs.Trigger>
+      <NativeTabs.Trigger name="attendance">
+        <Icon sf={{ default: "clock", selected: "clock.fill" }} />
+        <Label>Табель</Label>
+      </NativeTabs.Trigger>
+      <NativeTabs.Trigger name="debtors">
+        <Icon sf={{ default: "dollarsign.circle", selected: "dollarsign.circle.fill" }} />
+        <Label>Дебиторы</Label>
+      </NativeTabs.Trigger>
+      <NativeTabs.Trigger name="warehouse">
+        <Icon sf={{ default: "shippingbox", selected: "shippingbox.fill" }} />
+        <Label>Склад</Label>
+      </NativeTabs.Trigger>
+      <NativeTabs.Trigger name="employees">
+        <Icon sf={{ default: "person.2", selected: "person.2.fill" }} />
+        <Label>Сотрудники</Label>
+      </NativeTabs.Trigger>
+    </NativeTabs>
+  );
+}
+
+function ClassicTabLayout() {
+  const colors = useColors();
+  const colorScheme = useColorScheme();
+  const isDark = colorScheme === "dark";
+  const isIOS = Platform.OS === "ios";
+  const isWeb = Platform.OS === "web";
+
+  return (
+    <Tabs
+      screenOptions={{
+        tabBarActiveTintColor: colors.primary,
+        tabBarInactiveTintColor: colors.mutedForeground,
+        headerShown: false,
+        tabBarStyle: {
+          position: "absolute",
+          backgroundColor: isIOS ? "transparent" : colors.card,
+          borderTopWidth: 1,
+          borderTopColor: colors.border,
+          elevation: 0,
+          height: isWeb ? 84 : 60,
+        },
+        tabBarBackground: () =>
+          isIOS ? (
+            <BlurView
+              intensity={100}
+              tint={isDark ? "dark" : "light"}
+              style={StyleSheet.absoluteFill}
+            />
+          ) : isWeb ? (
+            <View
+              style={[StyleSheet.absoluteFill, { backgroundColor: colors.card }]}
+            />
+          ) : null,
+        tabBarLabelStyle: {
+          fontSize: 10,
+          fontFamily: "Inter_500Medium",
+          marginBottom: isWeb ? 8 : 2,
+        },
+        tabBarIconStyle: { marginTop: isWeb ? 8 : 0 },
+      }}
+    >
+      <Tabs.Screen
+        name="index"
+        options={{
+          title: "Главная",
+          tabBarIcon: ({ color }) => (
+            <Feather name="home" size={20} color={color} />
+          ),
+        }}
+      />
+      <Tabs.Screen
+        name="tasks"
+        options={{
+          title: "Задачи",
+          tabBarIcon: ({ color }) => (
+            <Feather name="check-square" size={20} color={color} />
+          ),
+        }}
+      />
+      <Tabs.Screen
+        name="attendance"
+        options={{
+          title: "Табель",
+          tabBarIcon: ({ color }) => (
+            <Feather name="clock" size={20} color={color} />
+          ),
+        }}
+      />
+      <Tabs.Screen
+        name="debtors"
+        options={{
+          title: "Дебиторы",
+          tabBarIcon: ({ color }) => (
+            <Feather name="dollar-sign" size={20} color={color} />
+          ),
+        }}
+      />
+      <Tabs.Screen
+        name="warehouse"
+        options={{
+          title: "Склад",
+          tabBarIcon: ({ color }) => (
+            <Feather name="package" size={20} color={color} />
+          ),
+        }}
+      />
+      <Tabs.Screen
+        name="employees"
+        options={{
+          title: "Команда",
+          tabBarIcon: ({ color }) => (
+            <Feather name="users" size={20} color={color} />
+          ),
+        }}
+      />
+    </Tabs>
+  );
+}
+
+export default function TabLayout() {
+  if (isLiquidGlassAvailable()) {
+    return <NativeTabLayout />;
+  }
+  return <ClassicTabLayout />;
+}
