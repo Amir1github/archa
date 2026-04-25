@@ -2,7 +2,7 @@ import React, { useState, useCallback } from "react";
 import {
   View, Text, ScrollView, StyleSheet, TouchableOpacity,
   ActivityIndicator, TextInput, RefreshControl, Platform,
-  Modal, Alert, Pressable, Dimensions,
+  Modal, Alert, Pressable, Dimensions, KeyboardAvoidingView,
 } from "react-native";
 import { Image } from "expo-image";
 import * as ImagePicker from "expo-image-picker";
@@ -11,7 +11,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Feather } from "@expo/vector-icons";
 
 import { useColors } from "@/hooks/useColors";
-import { apiGet, apiPut, apiDelete } from "@/constants/api";
+import { apiGet, apiPost, apiPut, apiDelete } from "@/constants/api";
 import { EmptyState } from "@/components/EmptyState";
 import type { WarehouseItem } from "@/types";
 
@@ -192,6 +192,215 @@ function DetailRow({ label, value, colors }: { label: string; value: string; col
   );
 }
 
+// ─── Add Item Modal ───────────────────────────────────────────────────────────
+const UNITS = ["шт", "кг", "л", "м", "м²", "м³", "уп", "рул", "бут", "пар"];
+const CATEGORIES = ["Краски и ЛКМ", "Кабели и провода", "Инструменты", "Крепёж", "Сантехника", "Электрика", "Прочее"];
+const WAREHOUSES = ["Склад №1", "Склад №2", "Магазин"];
+
+interface AddForm {
+  name: string; sku: string; category: string;
+  qty: string; unit: string; min_qty: string;
+  price: string; warehouse_name: string; supplier: string;
+}
+
+function AddItemModal({ visible, onClose, onAdded }: {
+  visible: boolean; onClose: () => void; onAdded: () => void;
+}) {
+  const colors = useColors();
+  const insets = useSafeAreaInsets();
+  const [saving, setSaving] = useState(false);
+  const [form, setForm] = useState<AddForm>({
+    name: "", sku: "", category: "Прочее",
+    qty: "", unit: "шт", min_qty: "",
+    price: "", warehouse_name: "Склад №1", supplier: "",
+  });
+
+  function set(key: keyof AddForm, val: string) {
+    setForm((f) => ({ ...f, [key]: val }));
+  }
+
+  function reset() {
+    setForm({ name: "", sku: "", category: "Прочее", qty: "", unit: "шт", min_qty: "", price: "", warehouse_name: "Склад №1", supplier: "" });
+  }
+
+  async function handleSave() {
+    if (!form.name.trim()) { Alert.alert("Ошибка", "Введите название товара"); return; }
+    setSaving(true);
+    try {
+      await apiPost("/api/warehouse", {
+        name: form.name.trim(),
+        sku: form.sku.trim(),
+        category: form.category,
+        qty: parseFloat(form.qty) || 0,
+        unit: form.unit,
+        min_qty: parseFloat(form.min_qty) || 0,
+        price: parseFloat(form.price) || 0,
+        warehouse_name: form.warehouse_name,
+        supplier: form.supplier.trim(),
+      });
+      reset();
+      onAdded();
+      onClose();
+    } catch {
+      Alert.alert("Ошибка", "Не удалось добавить товар");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  function handleClose() { reset(); onClose(); }
+
+  return (
+    <Modal visible={visible} transparent animationType="slide" onRequestClose={handleClose}>
+      <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === "ios" ? "padding" : "height"}>
+        <Pressable style={styles.modalOverlay} onPress={handleClose} />
+        <View style={[styles.addSheet, { backgroundColor: colors.card, paddingBottom: insets.bottom + 16 }]}>
+          {/* Handle */}
+          <View style={[styles.modalHandle, { backgroundColor: colors.border }]} />
+
+          {/* Header */}
+          <View style={styles.addHeader}>
+            <Text style={[styles.addTitle, { color: colors.foreground }]}>Новый товар</Text>
+            <TouchableOpacity onPress={handleClose} style={[styles.modalCloseBtn, { backgroundColor: colors.muted }]}>
+              <Feather name="x" size={18} color={colors.mutedForeground} />
+            </TouchableOpacity>
+          </View>
+
+          <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ gap: 14 }}>
+            {/* Name */}
+            <View style={styles.fieldGroup}>
+              <Text style={[styles.fieldLabel, { color: colors.mutedForeground }]}>Название *</Text>
+              <TextInput
+                value={form.name}
+                onChangeText={(v) => set("name", v)}
+                placeholder="Например: Краска фасадная белая"
+                placeholderTextColor={colors.mutedForeground}
+                style={[styles.fieldInput, { backgroundColor: colors.muted, color: colors.foreground, borderRadius: colors.radius / 2 }]}
+              />
+            </View>
+
+            {/* SKU + Unit */}
+            <View style={styles.rowGroup}>
+              <View style={[styles.fieldGroup, { flex: 1 }]}>
+                <Text style={[styles.fieldLabel, { color: colors.mutedForeground }]}>Артикул</Text>
+                <TextInput
+                  value={form.sku}
+                  onChangeText={(v) => set("sku", v)}
+                  placeholder="KFB-001"
+                  placeholderTextColor={colors.mutedForeground}
+                  style={[styles.fieldInput, { backgroundColor: colors.muted, color: colors.foreground, borderRadius: colors.radius / 2 }]}
+                />
+              </View>
+              <View style={[styles.fieldGroup, { width: 100 }]}>
+                <Text style={[styles.fieldLabel, { color: colors.mutedForeground }]}>Ед. изм.</Text>
+                <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ height: 44 }} contentContainerStyle={{ gap: 6, alignItems: "center" }}>
+                  {UNITS.map((u) => (
+                    <TouchableOpacity key={u} onPress={() => set("unit", u)}
+                      style={[styles.miniChip, { backgroundColor: form.unit === u ? colors.primary : colors.muted, borderRadius: 8 }]}>
+                      <Text style={[styles.miniChipText, { color: form.unit === u ? "#fff" : colors.mutedForeground }]}>{u}</Text>
+                    </TouchableOpacity>
+                  ))}
+                </ScrollView>
+              </View>
+            </View>
+
+            {/* Qty + Min qty */}
+            <View style={styles.rowGroup}>
+              <View style={[styles.fieldGroup, { flex: 1 }]}>
+                <Text style={[styles.fieldLabel, { color: colors.mutedForeground }]}>Количество</Text>
+                <TextInput
+                  value={form.qty}
+                  onChangeText={(v) => set("qty", v)}
+                  placeholder="0"
+                  placeholderTextColor={colors.mutedForeground}
+                  keyboardType="numeric"
+                  style={[styles.fieldInput, { backgroundColor: colors.muted, color: colors.foreground, borderRadius: colors.radius / 2 }]}
+                />
+              </View>
+              <View style={[styles.fieldGroup, { flex: 1 }]}>
+                <Text style={[styles.fieldLabel, { color: colors.mutedForeground }]}>Мин. остаток</Text>
+                <TextInput
+                  value={form.min_qty}
+                  onChangeText={(v) => set("min_qty", v)}
+                  placeholder="0"
+                  placeholderTextColor={colors.mutedForeground}
+                  keyboardType="numeric"
+                  style={[styles.fieldInput, { backgroundColor: colors.muted, color: colors.foreground, borderRadius: colors.radius / 2 }]}
+                />
+              </View>
+            </View>
+
+            {/* Price */}
+            <View style={styles.fieldGroup}>
+              <Text style={[styles.fieldLabel, { color: colors.mutedForeground }]}>Цена (сум)</Text>
+              <TextInput
+                value={form.price}
+                onChangeText={(v) => set("price", v)}
+                placeholder="0"
+                placeholderTextColor={colors.mutedForeground}
+                keyboardType="numeric"
+                style={[styles.fieldInput, { backgroundColor: colors.muted, color: colors.foreground, borderRadius: colors.radius / 2 }]}
+              />
+            </View>
+
+            {/* Category */}
+            <View style={styles.fieldGroup}>
+              <Text style={[styles.fieldLabel, { color: colors.mutedForeground }]}>Категория</Text>
+              <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 8, paddingVertical: 4 }}>
+                {CATEGORIES.map((c) => (
+                  <TouchableOpacity key={c} onPress={() => set("category", c)}
+                    style={[styles.chip, { backgroundColor: form.category === c ? colors.primary : colors.muted, borderRadius: 100 }]}>
+                    <Text style={[styles.chipText, { color: form.category === c ? "#fff" : colors.mutedForeground }]}>{c}</Text>
+                  </TouchableOpacity>
+                ))}
+              </ScrollView>
+            </View>
+
+            {/* Warehouse */}
+            <View style={styles.fieldGroup}>
+              <Text style={[styles.fieldLabel, { color: colors.mutedForeground }]}>Место хранения</Text>
+              <View style={{ flexDirection: "row", gap: 8 }}>
+                {WAREHOUSES.map((w) => (
+                  <TouchableOpacity key={w} onPress={() => set("warehouse_name", w)}
+                    style={[styles.chip, { backgroundColor: form.warehouse_name === w ? colors.primary : colors.muted, borderRadius: 100 }]}>
+                    <Text style={[styles.chipText, { color: form.warehouse_name === w ? "#fff" : colors.mutedForeground }]}>{w}</Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            </View>
+
+            {/* Supplier */}
+            <View style={styles.fieldGroup}>
+              <Text style={[styles.fieldLabel, { color: colors.mutedForeground }]}>Поставщик</Text>
+              <TextInput
+                value={form.supplier}
+                onChangeText={(v) => set("supplier", v)}
+                placeholder="Название поставщика"
+                placeholderTextColor={colors.mutedForeground}
+                style={[styles.fieldInput, { backgroundColor: colors.muted, color: colors.foreground, borderRadius: colors.radius / 2 }]}
+              />
+            </View>
+          </ScrollView>
+
+          {/* Save button */}
+          <TouchableOpacity
+            onPress={handleSave}
+            disabled={saving || !form.name.trim()}
+            style={[styles.saveBtn, {
+              backgroundColor: form.name.trim() && !saving ? colors.primary : colors.border,
+              borderRadius: colors.radius,
+              marginTop: 16,
+            }]}
+          >
+            {saving ? <ActivityIndicator size="small" color="#fff" /> : <Feather name="plus" size={20} color="#fff" />}
+            <Text style={styles.saveBtnText}>{saving ? "Сохранение..." : "Добавить товар"}</Text>
+          </TouchableOpacity>
+        </View>
+      </KeyboardAvoidingView>
+    </Modal>
+  );
+}
+
 // ─── Main Screen ──────────────────────────────────────────────────────────────
 export default function WarehouseScreen() {
   const colors = useColors();
@@ -200,6 +409,7 @@ export default function WarehouseScreen() {
   const [search, setSearch] = useState("");
   const [categoryFilter, setCategoryFilter] = useState("Все");
   const [selectedItem, setSelectedItem] = useState<WarehouseItem | null>(null);
+  const [showAdd, setShowAdd] = useState(false);
 
   const { data: items, isLoading, refetch, isRefetching } = useQuery<WarehouseItem[]>({
     queryKey: ["warehouse"],
@@ -243,6 +453,12 @@ export default function WarehouseScreen() {
             <Text style={[styles.alertText, { color: colors.danger }]}>{alertCount} тревог</Text>
           </View>
         )}
+        <TouchableOpacity
+          onPress={() => setShowAdd(true)}
+          style={[styles.addBtn, { backgroundColor: colors.primary }]}
+        >
+          <Feather name="plus" size={22} color="#fff" />
+        </TouchableOpacity>
       </View>
 
       {/* Search */}
@@ -382,12 +598,28 @@ export default function WarehouseScreen() {
         </ScrollView>
       )}
 
+      {/* FAB — добавить товар */}
+      <TouchableOpacity
+        onPress={() => setShowAdd(true)}
+        style={[styles.fab, { backgroundColor: colors.primary, bottom: insets.bottom + 80 }]}
+        activeOpacity={0.85}
+      >
+        <Feather name="plus" size={26} color="#fff" />
+      </TouchableOpacity>
+
       {/* Photo Modal */}
       <PhotoModal
         item={selectedItem}
         visible={!!selectedItem}
         onClose={() => setSelectedItem(null)}
         onUpdated={handleUpdated}
+      />
+
+      {/* Add Item Modal */}
+      <AddItemModal
+        visible={showAdd}
+        onClose={() => setShowAdd(false)}
+        onAdded={handleUpdated}
       />
     </View>
   );
@@ -438,6 +670,27 @@ const styles = StyleSheet.create({
   tagsRow: { flexDirection: "row", gap: 4 },
   stockTag: { paddingHorizontal: 8, paddingVertical: 3 },
   stockTagText: { fontSize: 11, fontFamily: "Inter_600SemiBold" },
+  addBtn: { width: 40, height: 40, borderRadius: 20, alignItems: "center", justifyContent: "center" },
+  fab: {
+    position: "absolute", right: 20, width: 56, height: 56, borderRadius: 28,
+    alignItems: "center", justifyContent: "center",
+    shadowColor: "#000", shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.25, shadowRadius: 8, elevation: 8,
+  },
+  // Add modal
+  addSheet: { maxHeight: SCREEN_H * 0.9, paddingHorizontal: 16, paddingTop: 8, borderTopLeftRadius: 24, borderTopRightRadius: 24 },
+  addHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 16 },
+  addTitle: { fontSize: 20, fontFamily: "Inter_700Bold" },
+  fieldGroup: { gap: 6 },
+  rowGroup: { flexDirection: "row", gap: 12 },
+  fieldLabel: { fontSize: 12, fontFamily: "Inter_600SemiBold", textTransform: "uppercase", letterSpacing: 0.5 },
+  fieldInput: { paddingHorizontal: 14, paddingVertical: 12, fontSize: 15, fontFamily: "Inter_400Regular" },
+  chip: { paddingHorizontal: 12, paddingVertical: 7 },
+  chipText: { fontSize: 13, fontFamily: "Inter_500Medium" },
+  miniChip: { paddingHorizontal: 8, paddingVertical: 5 },
+  miniChipText: { fontSize: 12, fontFamily: "Inter_500Medium" },
+  saveBtn: { flexDirection: "row", alignItems: "center", justifyContent: "center", paddingVertical: 14, gap: 8 },
+  saveBtnText: { color: "#fff", fontSize: 16, fontFamily: "Inter_700Bold" },
   // Modal
   modalOverlay: { flex: 1, backgroundColor: "rgba(0,0,0,0.5)" },
   modalSheet: { maxHeight: SCREEN_H * 0.9, paddingHorizontal: 16, paddingTop: 8 },

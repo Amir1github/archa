@@ -804,6 +804,35 @@ def get_warehouse(
     db.close()
     return rows
 
+class WarehouseCreateBody(BaseModel):
+    name: str
+    sku: str = ""
+    category: str = "Прочее"
+    qty: float = 0
+    unit: str = "шт"
+    min_qty: float = 0
+    price: float = 0
+    warehouse_name: str = "Склад №1"
+    supplier: str = ""
+
+@app.post("/api/warehouse", tags=["warehouse"], status_code=201)
+def create_warehouse_item(body: WarehouseCreateBody):
+    """Добавить новый товар на склад"""
+    db = get_db()
+    import uuid
+    item_id = "W" + str(uuid.uuid4())[:7].upper()
+    db.execute(
+        """INSERT INTO warehouse (id, name, sku, category, qty, unit, min_qty, price, warehouse_name, supplier, last_in, source, photo)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, date('now'), 'manual', '')""",
+        (item_id, body.name.strip(), body.sku.strip(), body.category.strip(),
+         body.qty, body.unit.strip(), body.min_qty, body.price,
+         body.warehouse_name.strip(), body.supplier.strip())
+    )
+    db.commit()
+    row = rows_to_list(db.execute("SELECT * FROM warehouse WHERE id=?", (item_id,)).fetchall())
+    db.close()
+    return row[0]
+
 class WarehousePhotoBody(BaseModel):
     photo: str  # base64 data URL (e.g. "data:image/jpeg;base64,...")
 
