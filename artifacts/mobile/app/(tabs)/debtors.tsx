@@ -9,6 +9,8 @@ import {
   TextInput,
   RefreshControl,
   Platform,
+  Alert,
+  Share,
 } from "react-native";
 import { useQuery } from "@tanstack/react-query";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -486,6 +488,98 @@ function AiAgentTab({
   );
 }
 
+function generateCSV(debtors: Debtor[]): string {
+  const header = "Клиент,ИНН,Долг (млн),Просрочка (дней),Статус,Обновлено";
+  const rows = debtors.map((d) =>
+    `"${d.name}","${d.inn || ""}",${d.debt},${d.overdue_days},"${STATUS_MAP[d.status] || d.status}","${d.updated_at || ""}"`
+  );
+  return [header, ...rows].join("\n");
+}
+
+function generateHTMLReport(debtors: Debtor[], stats: { total: number; overdue: number; critical: number; noComment: number }): string {
+  const rows = debtors
+    .sort((a, b) => b.debt - a.debt)
+    .map(
+      (d) => `<tr>
+        <td>${d.name}</td>
+        <td>${d.inn || "—"}</td>
+        <td style="color:#e53e3e;font-weight:bold">${d.debt.toFixed(1)} млн</td>
+        <td>${d.overdue_days} дн.</td>
+        <td>${STATUS_MAP[d.status] || d.status}</td>
+        <td>${(d.comments || []).length}</td>
+      </tr>`
+    )
+    .join("");
+
+  return `<!DOCTYPE html><html lang="ru"><head><meta charset="utf-8"/>
+    <style>
+      body{font-family:Arial,sans-serif;font-size:12px;color:#222;margin:24px}
+      h1{color:#1a7a3c;font-size:20px;margin-bottom:4px}
+      .subtitle{color:#888;margin-bottom:20px;font-size:11px}
+      .stats{display:flex;gap:16px;margin-bottom:24px}
+      .stat{background:#f5f5f5;padding:12px 18px;border-radius:8px;text-align:center}
+      .stat-value{font-size:22px;font-weight:bold;color:#1a7a3c}
+      .stat-label{font-size:10px;color:#888}
+      table{width:100%;border-collapse:collapse}
+      th{background:#1a7a3c;color:white;padding:8px;text-align:left;font-size:11px}
+      td{padding:7px 8px;border-bottom:1px solid #eee;font-size:11px}
+      tr:hover{background:#f9f9f9}
+      @media print{body{margin:0}.no-print{display:none}}
+    </style></head><body>
+    <h1>🏢 Пойтахт — Отчёт по дебиторам</h1>
+    <div class="subtitle">Дата: ${new Date().toLocaleDateString("ru-RU")} | Всего клиентов: ${debtors.length}</div>
+    <div class="stats">
+      <div class="stat"><div class="stat-value">${stats.total.toFixed(1)} млн</div><div class="stat-label">Общий долг</div></div>
+      <div class="stat"><div class="stat-value" style="color:#e53e3e">${stats.critical}</div><div class="stat-label">Критических</div></div>
+      <div class="stat"><div class="stat-value" style="color:#dd6b20">${stats.overdue}</div><div class="stat-label">Просрочено</div></div>
+      <div class="stat"><div class="stat-value" style="color:#718096">${stats.noComment}</div><div class="stat-label">Без комм.</div></div>
+    </div>
+    <table>
+      <thead><tr><th>Клиент</th><th>ИНН</th><th>Долг</th><th>Просрочка</th><th>Статус</th><th>Комм.</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+    <div style="margin-top:20px;color:#aaa;font-size:10px">Сформировано системой Пойтахт v7.0</div>
+    </body></html>`;
+}
+
+async function exportCSV(debtors: Debtor[]) {
+  const csv = generateCSV(debtors);
+  if (Platform.OS === "web") {
+    const blob = new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `debtors_${new Date().toISOString().slice(0, 10)}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  } else {
+    try {
+      await Share.share({ message: csv, title: "Отчёт дебиторов (CSV)" });
+    } catch {}
+  }
+}
+
+async function exportPDF(debtors: Debtor[], stats: { total: number; overdue: number; critical: number; noComment: number }) {
+  const html = generateHTMLReport(debtors, stats);
+  if (Platform.OS === "web") {
+    const w = window.open("", "_blank");
+    if (w) { w.document.write(html); w.document.close(); w.focus(); setTimeout(() => w.print(), 500); }
+  } else {
+    try {
+      const Print = await import("expo-print");
+      const Sharing = await import("expo-sharing");
+      const { uri } = await Print.printToFileAsync({ html });
+      if (await Sharing.isAvailableAsync()) {
+        await Sharing.shareAsync(uri, { mimeType: "application/pdf", dialogTitle: "Отчёт дебиторов" });
+      } else {
+        await Print.printAsync({ html });
+      }
+    } catch (e) {
+      Alert.alert("Ошибка", "Не удалось сформировать PDF");
+    }
+  }
+}
+
 function ReportTab({
   debtors,
   byStatus,
@@ -504,6 +598,33 @@ function ReportTab({
 
   return (
     <ScrollView contentContainerStyle={[styles.list, { paddingBottom: 100 }]} showsVerticalScrollIndicator={false}>
+      {/* Export buttons */}
+      <View style={styles.exportRow}>
+        <TouchableOpacity
+          onPress={() => exportCSV(debtors)}
+          style={[styles.exportBtn, { backgroundColor: colors.success + "18", borderColor: colors.success + "50", borderRadius: colors.radius / 2 }]}
+        >
+          <Feather name="download" size={15} color={colors.success} />
+          <Text style={[styles.exportText, { color: colors.success }]}>CSV</Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          onPress={() => exportPDF(debtors, stats)}
+          style={[styles.exportBtn, { backgroundColor: colors.danger + "18", borderColor: colors.danger + "50", borderRadius: colors.radius / 2 }]}
+        >
+          <Feather name="file-text" size={15} color={colors.danger} />
+          <Text style={[styles.exportText, { color: colors.danger }]}>PDF</Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          onPress={async () => {
+            try { await Share.share({ message: generateCSV(debtors), title: "Отчёт дебиторов" }); } catch {}
+          }}
+          style={[styles.exportBtn, { backgroundColor: colors.primary + "18", borderColor: colors.primary + "50", borderRadius: colors.radius / 2 }]}
+        >
+          <Feather name="share-2" size={15} color={colors.primary} />
+          <Text style={[styles.exportText, { color: colors.primary }]}>Поделиться</Text>
+        </TouchableOpacity>
+      </View>
+
       {/* Summary */}
       <View style={[styles.reportCard, { backgroundColor: colors.card, borderRadius: colors.radius, shadowColor: colors.shadow }]}>
         <Text style={[styles.reportCardTitle, { color: colors.foreground }]}>Сводка</Text>
@@ -712,4 +833,7 @@ const styles = StyleSheet.create({
   countSmall: { fontSize: 11, fontFamily: "Inter_400Regular" },
   barBg: { height: 6, borderRadius: 3, overflow: "hidden" },
   barFill: { height: 6, borderRadius: 3 },
+  exportRow: { flexDirection: "row", gap: 10, marginBottom: 4 },
+  exportBtn: { flex: 1, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 6, paddingVertical: 10, borderWidth: 1 },
+  exportText: { fontSize: 13, fontFamily: "Inter_600SemiBold" },
 });
