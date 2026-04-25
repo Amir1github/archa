@@ -18,19 +18,19 @@ author = "agent"
 
 [[workflows.workflow.tasks]]
 task = "workflow.run"
-args = "Poytakht Backend"
+args = "Start application"
 
 [[workflows.workflow]]
-name = "Poytakht Backend"
+name = "Start application"
 author = "agent"
+
+[workflows.workflow.metadata]
+outputType = "console"
 
 [[workflows.workflow.tasks]]
 task = "shell.exec"
 args = "cd artifacts/backend-py && uvicorn server:app --host 0.0.0.0 --port 8000"
 waitForPort = 8000
-
-[workflows.workflow.metadata]
-outputType = "console"
 
 [agent]
 stack = "PNPM_WORKSPACE"

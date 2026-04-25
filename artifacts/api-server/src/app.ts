@@ -36,13 +36,16 @@ app.use(express.urlencoded({ extended: true }));
 app.use("/api", router);
 
 // ─── Proxy all /api/* to Python FastAPI backend on port 8001 ─────────────────
+// Uses app.use (not app.all) to avoid Express 5's ban on bare wildcards.
+// req.url inside this middleware has "/api" stripped, so we prepend it back.
 const PYTHON_PORT = 8001;
 
-app.all("/api/*", (req: Request, res: Response) => {
+app.use("/api", (req: Request, res: Response) => {
+  const proxyPath = "/api" + req.url;
   const options: http.RequestOptions = {
     hostname: "127.0.0.1",
     port: PYTHON_PORT,
-    path: req.url,
+    path: proxyPath,
     method: req.method,
     headers: { ...req.headers, host: `127.0.0.1:${PYTHON_PORT}` },
   };

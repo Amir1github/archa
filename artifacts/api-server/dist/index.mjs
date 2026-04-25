@@ -32459,11 +32459,12 @@ app.use(import_express3.default.json({ limit: "20mb" }));
 app.use(import_express3.default.urlencoded({ extended: true }));
 app.use("/api", routes_default);
 var PYTHON_PORT = 8001;
-app.all("/api/*", (req, res) => {
+app.use("/api", (req, res) => {
+  const proxyPath = "/api" + req.url;
   const options = {
     hostname: "127.0.0.1",
     port: PYTHON_PORT,
-    path: req.url,
+    path: proxyPath,
     method: req.method,
     headers: { ...req.headers, host: `127.0.0.1:${PYTHON_PORT}` }
   };

@@ -18,6 +18,10 @@ localPort = 18115
 [services.development]
 run = "pnpm --filter @workspace/mobile run dev"
 
+[services.production]
+serve = "static"
+publicDir = "dist"
+
 [services.env]
 PORT = "18115"
 BASE_PATH = "/"
