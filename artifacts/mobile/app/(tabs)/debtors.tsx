@@ -94,10 +94,12 @@ export default function DebtorsScreen() {
   const { data: debtors = [], isLoading, refetch } = useQuery<Debtor[]>({
     queryKey: ["debtors"],
     queryFn: () => apiGet("/api/debtors"),
+    staleTime: 3 * 60 * 1000,
   });
   const { data: employees = [] } = useQuery<Employee[]>({
     queryKey: ["employees"],
     queryFn: () => apiGet("/api/employees"),
+    staleTime: 10 * 60 * 1000,
   });
 
   const empMap = useMemo(() => {

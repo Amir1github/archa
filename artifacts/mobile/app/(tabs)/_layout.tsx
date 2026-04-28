@@ -13,7 +13,7 @@ function NativeTabLayout() {
     <NativeTabs>
       <NativeTabs.Trigger name="index">
         <Icon sf={{ default: "house", selected: "house.fill" }} />
-        <Label>Главная</Label>
+        <Label>Директор</Label>
       </NativeTabs.Trigger>
       <NativeTabs.Trigger name="tasks">
         <Icon sf={{ default: "checkmark.square", selected: "checkmark.square.fill" }} />
@@ -22,6 +22,10 @@ function NativeTabLayout() {
       <NativeTabs.Trigger name="attendance">
         <Icon sf={{ default: "clock", selected: "clock.fill" }} />
         <Label>HR</Label>
+      </NativeTabs.Trigger>
+      <NativeTabs.Trigger name="workplan">
+        <Icon sf={{ default: "calendar", selected: "calendar.fill" }} />
+        <Label>График</Label>
       </NativeTabs.Trigger>
       <NativeTabs.Trigger name="debtors">
         <Icon sf={{ default: "dollarsign.circle", selected: "dollarsign.circle.fill" }} />
@@ -87,7 +91,7 @@ function ClassicTabLayout() {
       <Tabs.Screen
         name="index"
         options={{
-          title: "Главная",
+          title: "Директор",
           tabBarIcon: ({ color }) => <Feather name="home" size={20} color={color} />,
         }}
       />
@@ -103,6 +107,13 @@ function ClassicTabLayout() {
         options={{
           title: "HR",
           tabBarIcon: ({ color }) => <Feather name="clock" size={20} color={color} />,
+        }}
+      />
+      <Tabs.Screen
+        name="workplan"
+        options={{
+          title: "График",
+          tabBarIcon: ({ color }) => <Feather name="calendar" size={20} color={color} />,
         }}
       />
       <Tabs.Screen

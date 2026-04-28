@@ -501,11 +501,13 @@ export default function WarehouseScreen() {
   const { data: items, isLoading, refetch, isRefetching } = useQuery<WarehouseItem[]>({
     queryKey: ["warehouse"],
     queryFn: () => apiGet("/api/warehouse"),
+    staleTime: 3 * 60 * 1000,
   });
 
   const { data: categories } = useQuery<string[]>({
     queryKey: ["warehouse-categories"],
     queryFn: () => apiGet("/api/warehouse/categories"),
+    staleTime: 10 * 60 * 1000,
   });
 
   const allCategories = ["Все", ...(categories || [])];

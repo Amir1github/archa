@@ -9,28 +9,6 @@ args = ["pnpm", "store", "prune"]
 env = { "CI" = "true" }
 
 [workflows]
-runButton = "Project"
-
-[[workflows.workflow]]
-name = "Project"
-mode = "parallel"
-author = "agent"
-
-[[workflows.workflow.tasks]]
-task = "workflow.run"
-args = "Start application"
-
-[[workflows.workflow]]
-name = "Start application"
-author = "agent"
-
-[workflows.workflow.metadata]
-outputType = "console"
-
-[[workflows.workflow.tasks]]
-task = "shell.exec"
-args = "cd artifacts/backend-py && uvicorn server:app --host 0.0.0.0 --port 8000"
-waitForPort = 8000
 
 [agent]
 stack = "PNPM_WORKSPACE"
@@ -51,6 +29,10 @@ externalPort = 8081
 [[ports]]
 localPort = 8082
 externalPort = 3002
+
+[[ports]]
+localPort = 8083
+externalPort = 3003
 
 [[ports]]
 localPort = 18115

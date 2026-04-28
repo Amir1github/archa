@@ -41,20 +41,24 @@ export default function AttendanceScreen() {
   const { data: attendance = [], isLoading: loadAtt, refetch } = useQuery<Attendance[]>({
     queryKey: ["attendance", date],
     queryFn: () => apiGet(`/api/attendance?date=${date}`),
+    staleTime: 2 * 60 * 1000,
   });
   const { data: employees = [], isLoading: loadEmp } = useQuery<Employee[]>({
     queryKey: ["employees"],
     queryFn: () => apiGet("/api/employees"),
+    staleTime: 10 * 60 * 1000,
   });
   const { data: report = [], isLoading: loadReport } = useQuery<AttendanceReport[]>({
     queryKey: ["attendance-report"],
     queryFn: () => apiGet("/api/attendance/report?period=month"),
     enabled: activeTab === "report" || activeTab === "team",
+    staleTime: 5 * 60 * 1000,
   });
   const { data: offices = [], isLoading: loadOffices } = useQuery<Office[]>({
     queryKey: ["offices"],
     queryFn: () => apiGet("/api/offices"),
     enabled: activeTab === "map",
+    staleTime: 15 * 60 * 1000,
   });
 
   const empMap = useMemo(() => {

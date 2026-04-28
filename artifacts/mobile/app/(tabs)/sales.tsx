@@ -16,7 +16,7 @@ interface SalesPlan { manager_id: number; period: string; amount: number; update
 interface SalesHistory { year: number; month: number; category: string; amount: number; }
 
 type PeriodType = "month" | "quarter" | "year";
-type TabKey = "analytics" | "plan" | "history";
+type TabKey = "analytics" | "plan" | "history" | "forecast";
 
 const MONTH_NAMES = ["Янв", "Фев", "Мар", "Апр", "Май", "Июн", "Июл", "Авг", "Сен", "Окт", "Ноя", "Дек"];
 const QUARTER_LABELS = ["Q1 (Янв-Мар)", "Q2 (Апр-Июн)", "Q3 (Июл-Сен)", "Q4 (Окт-Дек)"];
@@ -40,15 +40,18 @@ export default function SalesScreen() {
   const { data: facts = [], isLoading: loadFacts } = useQuery<SalesFact[]>({
     queryKey: ["sales-facts"],
     queryFn: () => apiGet("/api/sales/facts"),
+    staleTime: 5 * 60 * 1000,
   });
   const { data: plans = [], isLoading: loadPlans } = useQuery<SalesPlan[]>({
     queryKey: ["sales-plans"],
     queryFn: () => apiGet("/api/sales/plans"),
+    staleTime: 5 * 60 * 1000,
   });
   const { data: history = [], isLoading: loadHist } = useQuery<SalesHistory[]>({
     queryKey: ["sales-history"],
     queryFn: () => apiGet("/api/sales/history"),
-    enabled: activeTab === "history",
+    enabled: activeTab === "history" || activeTab === "forecast",
+    staleTime: 5 * 60 * 1000,
   });
   const { data: employees = [] } = useQuery<Employee[]>({
     queryKey: ["employees"],
@@ -147,12 +150,46 @@ export default function SalesScreen() {
     return years;
   }, [history]);
 
+  const forecastData = useMemo(() => {
+    const curYear = new Date().getFullYear();
+    const curMonth = new Date().getMonth();
+    const yearTotals: Record<number, number> = {};
+    history.forEach((h) => {
+      yearTotals[h.year] = (yearTotals[h.year] || 0) + h.amount;
+    });
+    const sortedYears = Object.keys(yearTotals).map(Number).sort();
+    let trend = 0;
+    if (sortedYears.length >= 2) {
+      const last = yearTotals[sortedYears[sortedYears.length - 1]] || 0;
+      const prev = yearTotals[sortedYears[sortedYears.length - 2]] || 0;
+      trend = prev > 0 ? (last - prev) / prev : 0;
+    }
+    const lastYearTotal = yearTotals[curYear - 1] || yearTotals[sortedYears[sortedYears.length - 1]] || 0;
+    const baseAnnual = lastYearTotal * (1 + trend);
+    const monthlyBase = MONTH_NAMES.map((name, i) => {
+      const seasonFactor = [0.065, 0.07, 0.085, 0.09, 0.09, 0.085, 0.08, 0.085, 0.09, 0.095, 0.075, 0.09][i];
+      const base = baseAnnual * seasonFactor;
+      const factThisYear = facts.filter((f) => f.period === `${curYear}-${String(i + 1).padStart(2, "0")}`).reduce((s, f) => s + f.amount, 0);
+      return {
+        name,
+        base: Math.round(base),
+        optimistic: Math.round(base * 1.15),
+        pessimistic: Math.round(base * 0.85),
+        actual: i < curMonth ? factThisYear : null,
+        isFuture: i >= curMonth,
+      };
+    });
+    const annualBase = Math.round(baseAnnual);
+    const confidence = Math.min(95, Math.max(50, 70 + sortedYears.length * 5));
+    return { monthlyBase, annualBase, trend: Math.round(trend * 100), confidence, histYears: sortedYears.length };
+  }, [history, facts]);
+
   return (
     <View style={[styles.container, { backgroundColor: colors.background }]}>
       <View style={[styles.header, { paddingTop: topPad + 12, backgroundColor: colors.card, borderBottomColor: colors.border }]}>
         <Text style={[styles.title, { color: colors.foreground }]}>Продажи</Text>
-        <View style={styles.tabRow}>
-          {([["analytics", "Аналитика", "bar-chart-2"], ["plan", "Планы", "target"], ["history", "История", "clock"]] as [TabKey, string, string][]).map(([key, label, icon]) => (
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.tabRow} contentContainerStyle={{ flexDirection: "row" }}>
+          {([["analytics", "Аналитика", "bar-chart-2"], ["plan", "Планы", "target"], ["history", "История", "clock"], ["forecast", "Прогноз", "trending-up"]] as [TabKey, string, string][]).map(([key, label, icon]) => (
             <TouchableOpacity
               key={key}
               onPress={() => setActiveTab(key)}
@@ -162,7 +199,7 @@ export default function SalesScreen() {
               <Text style={[styles.tabText, { color: activeTab === key ? colors.primary : colors.mutedForeground }]}>{label}</Text>
             </TouchableOpacity>
           ))}
-        </View>
+        </ScrollView>
       </View>
 
       {isLoading ? (
@@ -409,6 +446,107 @@ export default function SalesScreen() {
               )}
             </ScrollView>
           )}
+
+          {activeTab === "forecast" && (
+            <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
+              {loadHist ? <ActivityIndicator color={colors.primary} style={{ marginTop: 20 }} /> : (
+                <>
+                  {/* Forecast Hero */}
+                  <View style={[styles.fcHero, { backgroundColor: colors.primary, borderRadius: colors.radius }]}>
+                    <Text style={styles.fcHeroTitle}>Прогноз продаж</Text>
+                    <Text style={styles.fcHeroYear}>{new Date().getFullYear()}</Text>
+                    <Text style={styles.fcHeroAmt}>{fmtM(forecastData.annualBase)}</Text>
+                    <Text style={styles.fcHeroLabel}>базовый прогноз (год)</Text>
+                    <View style={styles.fcHeroRow}>
+                      <View style={styles.fcHeroStat}>
+                        <Text style={styles.fcHeroStatVal}>{forecastData.trend > 0 ? "+" : ""}{forecastData.trend}%</Text>
+                        <Text style={styles.fcHeroStatLabel}>тренд</Text>
+                      </View>
+                      <View style={[styles.fcHeroDiv, { backgroundColor: "rgba(255,255,255,0.3)" }]} />
+                      <View style={styles.fcHeroStat}>
+                        <Text style={styles.fcHeroStatVal}>{forecastData.confidence}%</Text>
+                        <Text style={styles.fcHeroStatLabel}>достоверность</Text>
+                      </View>
+                      <View style={[styles.fcHeroDiv, { backgroundColor: "rgba(255,255,255,0.3)" }]} />
+                      <View style={styles.fcHeroStat}>
+                        <Text style={styles.fcHeroStatVal}>{forecastData.histYears}</Text>
+                        <Text style={styles.fcHeroStatLabel}>лет данных</Text>
+                      </View>
+                    </View>
+                  </View>
+
+                  {/* Scenarios */}
+                  <View style={[styles.chartCard, { backgroundColor: colors.card, borderRadius: colors.radius, shadowColor: colors.shadow }]}>
+                    <Text style={[styles.chartTitle, { color: colors.foreground }]}>Сценарии на год</Text>
+                    {[
+                      { label: "Оптимистичный", val: forecastData.annualBase * 1.15, color: colors.success, icon: "trending-up" },
+                      { label: "Базовый", val: forecastData.annualBase, color: colors.primary, icon: "minus" },
+                      { label: "Пессимистичный", val: forecastData.annualBase * 0.85, color: colors.danger, icon: "trending-down" },
+                    ].map((sc) => (
+                      <View key={sc.label} style={[styles.scRow, { borderBottomColor: colors.border }]}>
+                        <View style={[styles.scIcon, { backgroundColor: sc.color + "15" }]}>
+                          <Feather name={sc.icon as any} size={14} color={sc.color} />
+                        </View>
+                        <Text style={[styles.scLabel, { color: colors.foreground }]}>{sc.label}</Text>
+                        <Text style={[styles.scAmt, { color: sc.color }]}>{fmtM(Math.round(sc.val))}</Text>
+                      </View>
+                    ))}
+                  </View>
+
+                  {/* Monthly forecast chart */}
+                  <View style={[styles.chartCard, { backgroundColor: colors.card, borderRadius: colors.radius, shadowColor: colors.shadow }]}>
+                    <Text style={[styles.chartTitle, { color: colors.foreground }]}>Прогноз по месяцам</Text>
+                    <View style={styles.legend}>
+                      <View style={styles.legendItem}><View style={[styles.legendDot, { backgroundColor: colors.primary }]} /><Text style={[styles.legendLabel, { color: colors.mutedForeground }]}>Прогноз</Text></View>
+                      <View style={styles.legendItem}><View style={[styles.legendDot, { backgroundColor: colors.success }]} /><Text style={[styles.legendLabel, { color: colors.mutedForeground }]}>Факт</Text></View>
+                    </View>
+                    <View style={styles.barChart}>
+                      {forecastData.monthlyBase.map((item) => {
+                        const maxVal = Math.max(...forecastData.monthlyBase.map((m) => Math.max(m.base, m.actual || 0)), 1);
+                        const baseH = (item.base / maxVal) * 120;
+                        const actualH = item.actual !== null ? (item.actual / maxVal) * 120 : 0;
+                        return (
+                          <View key={item.name} style={styles.barGroup}>
+                            <View style={styles.barPair}>
+                              <View style={[styles.bar, {
+                                height: baseH,
+                                backgroundColor: item.isFuture ? colors.primary + "40" : colors.primary + "20",
+                                borderTopWidth: 2,
+                                borderTopColor: colors.primary
+                              }]} />
+                              {item.actual !== null && (
+                                <View style={[styles.bar, { height: actualH, backgroundColor: item.actual >= item.base ? colors.success : colors.warning }]} />
+                              )}
+                            </View>
+                            <Text style={[styles.barLabel, { color: item.isFuture ? colors.primary : colors.mutedForeground }]}>{item.name}</Text>
+                          </View>
+                        );
+                      })}
+                    </View>
+                  </View>
+
+                  {/* Key factors */}
+                  <View style={[styles.chartCard, { backgroundColor: colors.card, borderRadius: colors.radius, shadowColor: colors.shadow }]}>
+                    <Text style={[styles.chartTitle, { color: colors.foreground }]}>Ключевые факторы</Text>
+                    {[
+                      { factor: "Исторический тренд", impact: forecastData.trend > 0 ? "позитивный" : forecastData.trend < 0 ? "негативный" : "нейтральный", icon: "bar-chart-2", color: forecastData.trend >= 0 ? colors.success : colors.danger },
+                      { factor: "Сезонность (весна)", impact: "рост +8–12%", icon: "sun", color: colors.warning },
+                      { factor: "База лет данных", impact: `${forecastData.histYears} лет`, icon: "database", color: colors.primary },
+                      { factor: "Достоверность", impact: `${forecastData.confidence}%`, icon: "shield", color: forecastData.confidence >= 80 ? colors.success : colors.warning },
+                    ].map((f) => (
+                      <View key={f.factor} style={[styles.factorRow, { borderBottomColor: colors.border }]}>
+                        <View style={[styles.factorIcon, { backgroundColor: f.color + "15" }]}>
+                          <Feather name={f.icon as any} size={14} color={f.color} />
+                        </View>
+                        <Text style={[styles.factorName, { color: colors.foreground }]}>{f.factor}</Text>
+                        <Text style={[styles.factorImpact, { color: f.color }]}>{f.impact}</Text>
+                      </View>
+                    ))}
+                  </View>
+                </>
+              )}
+            </ScrollView>
+          )}
         </>
       )}
     </View>
@@ -482,4 +620,22 @@ const styles = StyleSheet.create({
   miniBarWrap: { flex: 1, alignItems: "center", gap: 2 },
   miniBar: { width: "100%", borderRadius: 2, minHeight: 2 },
   miniBarLabel: { fontSize: 8 },
+  fcHero: { padding: 20, alignItems: "center", gap: 4 },
+  fcHeroTitle: { color: "rgba(255,255,255,0.8)", fontSize: 12, fontFamily: "Inter_500Medium" },
+  fcHeroYear: { color: "rgba(255,255,255,0.7)", fontSize: 11, fontFamily: "Inter_400Regular" },
+  fcHeroAmt: { color: "#fff", fontSize: 36, fontFamily: "Inter_700Bold", marginTop: 4 },
+  fcHeroLabel: { color: "rgba(255,255,255,0.8)", fontSize: 12, fontFamily: "Inter_400Regular", marginBottom: 12 },
+  fcHeroRow: { flexDirection: "row", alignItems: "center", gap: 0, width: "100%" },
+  fcHeroStat: { flex: 1, alignItems: "center" },
+  fcHeroStatVal: { color: "#fff", fontSize: 18, fontFamily: "Inter_700Bold" },
+  fcHeroStatLabel: { color: "rgba(255,255,255,0.75)", fontSize: 10, fontFamily: "Inter_400Regular" },
+  fcHeroDiv: { width: 1, height: 24 },
+  scRow: { flexDirection: "row", alignItems: "center", gap: 10, paddingVertical: 10, borderBottomWidth: 1 },
+  scIcon: { width: 30, height: 30, borderRadius: 8, alignItems: "center", justifyContent: "center" },
+  scLabel: { flex: 1, fontSize: 14, fontFamily: "Inter_500Medium" },
+  scAmt: { fontSize: 16, fontFamily: "Inter_700Bold" },
+  factorRow: { flexDirection: "row", alignItems: "center", gap: 10, paddingVertical: 9, borderBottomWidth: 1 },
+  factorIcon: { width: 28, height: 28, borderRadius: 7, alignItems: "center", justifyContent: "center" },
+  factorName: { flex: 1, fontSize: 13, fontFamily: "Inter_500Medium" },
+  factorImpact: { fontSize: 12, fontFamily: "Inter_600SemiBold" },
 });
