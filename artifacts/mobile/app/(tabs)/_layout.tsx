@@ -1,11 +1,18 @@
 import { BlurView } from "expo-blur";
 import { isLiquidGlassAvailable } from "expo-glass-effect";
-import { Tabs } from "expo-router";
+import { Redirect, Tabs } from "expo-router";
 import { Icon, Label, NativeTabs } from "expo-router/unstable-native-tabs";
 import { Feather } from "@expo/vector-icons";
 import React from "react";
-import { Platform, StyleSheet, View, useColorScheme } from "react-native";
+import {
+  ActivityIndicator,
+  Platform,
+  StyleSheet,
+  View,
+  useColorScheme,
+} from "react-native";
 
+import { useAuth } from "@/contexts/AuthContext";
 import { useColors } from "@/hooks/useColors";
 
 function NativeTabLayout() {
@@ -42,6 +49,10 @@ function NativeTabLayout() {
       <NativeTabs.Trigger name="ai-chat">
         <Icon sf={{ default: "cpu", selected: "cpu.fill" }} />
         <Label>AI Агент</Label>
+      </NativeTabs.Trigger>
+      <NativeTabs.Trigger name="profile">
+        <Icon sf={{ default: "person.circle", selected: "person.circle.fill" }} />
+        <Label>Профиль</Label>
       </NativeTabs.Trigger>
     </NativeTabs>
   );
@@ -145,6 +156,13 @@ function ClassicTabLayout() {
         }}
       />
       <Tabs.Screen
+        name="profile"
+        options={{
+          title: "Профиль",
+          tabBarIcon: ({ color }) => <Feather name="user" size={20} color={color} />,
+        }}
+      />
+      <Tabs.Screen
         name="employees"
         options={{
           href: null,
@@ -155,6 +173,21 @@ function ClassicTabLayout() {
 }
 
 export default function TabLayout() {
+  const { user, isLoading } = useAuth();
+  const colors = useColors();
+
+  if (isLoading) {
+    return (
+      <View style={{ flex: 1, justifyContent: "center", alignItems: "center", backgroundColor: colors.background }}>
+        <ActivityIndicator color={colors.primary} size="large" />
+      </View>
+    );
+  }
+
+  if (!user) {
+    return <Redirect href="/login" />;
+  }
+
   if (isLiquidGlassAvailable()) {
     return <NativeTabLayout />;
   }

@@ -8,6 +8,10 @@ export interface Employee {
   is_admin: number;
   salary: number;
   tg_id?: number;
+  phone?: string;
+  bio?: string;
+  avatar?: string;
+  pin?: string | null;
   created_at: string;
 }
 

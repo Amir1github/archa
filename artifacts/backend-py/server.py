@@ -91,6 +91,17 @@ def row_to_dict(row) -> Optional[dict]:
 def rows_to_list(rows) -> List[dict]:
     return [dict(r) for r in rows]
 
+def strip_pin(emp: Optional[dict]) -> Optional[dict]:
+    """Маскировать PIN: вернуть '*' если установлен, иначе None."""
+    if emp is None:
+        return None
+    result = dict(emp)
+    result["pin"] = "*" if result.get("pin") else None
+    return result
+
+def strip_pins(emps: List[dict]) -> List[dict]:
+    return [strip_pin(e) for e in emps]  # type: ignore
+
 def init_db():
     db = get_db()
     db.executescript("""
@@ -276,6 +287,18 @@ def init_db():
     CREATE INDEX IF NOT EXISTS idx_notif_emp  ON notifications(emp_id, read);
     """)
     db.commit()
+    # ── Миграции (добавляем колонки если их нет) ───────────────────────
+    for col, definition in [
+        ("phone",  "TEXT DEFAULT ''"),
+        ("bio",    "TEXT DEFAULT ''"),
+        ("avatar", "TEXT DEFAULT ''"),
+        ("pin",    "TEXT DEFAULT NULL"),
+    ]:
+        try:
+            db.execute(f"ALTER TABLE employees ADD COLUMN {col} {definition}")
+            db.commit()
+        except Exception:
+            pass
     _seed_demo(db)
     db.close()
     log.info(f"БД инициализирована: {DB_PATH}")
@@ -470,6 +493,23 @@ class OfficeCreate(BaseModel):
     lng: float
     radius: int = 200
 
+class ProfileUpdate(BaseModel):
+    name: Optional[str] = None
+    role: Optional[str] = None
+    phone: Optional[str] = None
+    bio: Optional[str] = None
+    tg_id: Optional[int] = None
+    color: Optional[str] = None
+    avatar: Optional[str] = None
+
+class PinRequest(BaseModel):
+    new_pin: str
+    old_pin: Optional[str] = None
+
+class LoginRequest(BaseModel):
+    emp_id: int
+    pin: str
+
 class SettingUpdate(BaseModel):
     key: str
     value: str
@@ -499,7 +539,7 @@ def get_employees():
     db = get_db()
     rows = rows_to_list(db.execute("SELECT * FROM employees ORDER BY id").fetchall())
     db.close()
-    return rows
+    return strip_pins(rows)
 
 @app.post("/api/employees", status_code=201, tags=["employees"])
 async def create_employee(emp: EmployeeCreate):
@@ -511,6 +551,62 @@ async def create_employee(emp: EmployeeCreate):
     db.close()
     await ws_manager.broadcast("employee_updated", rec)
     return rec
+
+# ══════════════════════════════════════════════════════════════════════
+# ПРОФИЛЬ / АВТОРИЗАЦИЯ
+# ══════════════════════════════════════════════════════════════════════
+@app.post("/api/auth/login", tags=["auth"])
+async def auth_login(req: LoginRequest):
+    db = get_db()
+    emp = row_to_dict(db.execute("SELECT * FROM employees WHERE id=?", (req.emp_id,)).fetchone())
+    db.close()
+    if not emp:
+        raise HTTPException(status_code=404, detail="Сотрудник не найден")
+    saved_pin = emp.get("pin")
+    if saved_pin:
+        if req.pin != saved_pin:
+            raise HTTPException(status_code=401, detail="Неверный PIN-код")
+    return {"success": True, "employee": strip_pin(emp)}
+
+@app.put("/api/employees/{emp_id}/profile", tags=["employees"])
+async def update_profile(emp_id: int, p: ProfileUpdate):
+    db = get_db()
+    emp = row_to_dict(db.execute("SELECT * FROM employees WHERE id=?", (emp_id,)).fetchone())
+    if not emp:
+        db.close()
+        raise HTTPException(status_code=404, detail="Сотрудник не найден")
+    fields, vals = [], []
+    if p.name    is not None: fields.append("name=?");   vals.append(p.name)
+    if p.role    is not None: fields.append("role=?");   vals.append(p.role)
+    if p.phone   is not None: fields.append("phone=?");  vals.append(p.phone)
+    if p.bio     is not None: fields.append("bio=?");    vals.append(p.bio)
+    if p.tg_id   is not None: fields.append("tg_id=?");  vals.append(p.tg_id)
+    if p.color   is not None: fields.append("color=?");  vals.append(p.color)
+    if p.avatar  is not None: fields.append("avatar=?"); vals.append(p.avatar)
+    if fields:
+        db.execute(f"UPDATE employees SET {', '.join(fields)} WHERE id=?", vals + [emp_id])
+        db.commit()
+    rec = row_to_dict(db.execute("SELECT * FROM employees WHERE id=?", (emp_id,)).fetchone())
+    db.close()
+    await ws_manager.broadcast("employee_updated", strip_pin(rec))
+    return strip_pin(rec)
+
+@app.put("/api/employees/{emp_id}/pin", tags=["employees"])
+async def update_pin(emp_id: int, req: PinRequest):
+    db = get_db()
+    emp = row_to_dict(db.execute("SELECT * FROM employees WHERE id=?", (emp_id,)).fetchone())
+    if not emp:
+        db.close()
+        raise HTTPException(status_code=404, detail="Сотрудник не найден")
+    if emp.get("pin") and req.old_pin != emp["pin"]:
+        db.close()
+        raise HTTPException(status_code=401, detail="Неверный текущий PIN")
+    if not req.new_pin or len(req.new_pin) != 4 or not req.new_pin.isdigit():
+        raise HTTPException(status_code=400, detail="PIN должен быть 4-значным числом")
+    db.execute("UPDATE employees SET pin=? WHERE id=?", (req.new_pin, emp_id))
+    db.commit()
+    db.close()
+    return {"success": True}
 
 # ══════════════════════════════════════════════════════════════════════
 # ЗАДАЧИ

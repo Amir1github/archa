@@ -32,7 +32,10 @@
 Запуск: api-server запускает Python автоматически (port 8001). Workflow: `artifacts/api-server: API Server`
 
 API эндпоинты:
-- `GET /api/employees` — список сотрудников
+- `GET /api/employees` — список сотрудников (PIN маскирован: `"*"` / `null`)
+- `POST /api/auth/login` — вход по emp_id + PIN; возвращает employee (без PIN)
+- `PUT /api/employees/{id}/profile` — обновление профиля (name, phone, bio, tg_id, color, avatar)
+- `PUT /api/employees/{id}/pin` — установить/сменить PIN (old_pin требуется если PIN уже есть)
 - `GET/POST /api/tasks` — задачи
 - `GET /api/attendance` — посещаемость
 - `GET /api/debtors` — дебиторы
@@ -41,7 +44,12 @@ API эндпоинты:
 
 ## Mobile App (Expo)
 
-Экраны (8 вкладок в нижнем меню):
+Аутентификация:
+- `app/login.tsx` — экран выбора профиля + ввод/установка 4-значного PIN
+- `contexts/AuthContext.tsx` — контекст с user/login/logout/updateUser, AsyncStorage для персистентности
+- Auth guard: `(tabs)/_layout.tsx` редиректит на `/login` если user=null
+
+Экраны (9 вкладок в нижнем меню):
 - **Директор** (`/(tabs)/index`) — Director Dashboard: hero-карта, алерты, KPI-сетка (4 карточки), активные задачи, просроченные, топ-должники, быстрый доступ
 - **Задачи** (`/(tabs)/tasks`) — список с фильтрами + **Kanban-вид** (переключатель Список/Kanban в хедере), создание задач, FlatList для производительности
 - **HR** (`/(tabs)/attendance`) — посещаемость по дням/неделям/отчётам
@@ -50,6 +58,7 @@ API эндпоинты:
 - **Продажи** (`/(tabs)/sales`) — аналитика/планы/история + **Прогноз** (4-я вкладка): сценарии, факторы, месячный прогноз
 - **Склад** (`/(tabs)/warehouse`) — складские остатки с тревогами
 - **AI Агент** (`/(tabs)/ai-chat`) — Gemini 2.5 Flash чат
+- **Профиль** (`/(tabs)/profile`) — аватар, личные данные (name/phone/bio/tg), выбор цвета, смена PIN, выход
 - **Детали задачи** (`/task/[id]`) — изменение статуса, комментарии
 
 Производительность: staleTime на всех React Query запросах (2–15 мин), FlatList в Tasks/WorkPlan, React.memo для карточек.
