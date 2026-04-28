@@ -50,6 +50,19 @@ app.use("/api", (req: Request, res: Response) => {
     headers: { ...req.headers, host: `127.0.0.1:${PYTHON_PORT}` },
   };
 
+  // express.json() already consumed the body stream, so we re-serialize
+  // req.body for POST/PUT/PATCH requests instead of piping the raw stream.
+  const hasBody = req.body !== undefined && req.body !== null && Object.keys(req.body).length > 0;
+  const bodyBuf = hasBody ? Buffer.from(JSON.stringify(req.body)) : null;
+
+  if (bodyBuf) {
+    options.headers = {
+      ...options.headers,
+      "content-type": "application/json",
+      "content-length": String(bodyBuf.byteLength),
+    };
+  }
+
   const proxyReq = http.request(options, (proxyRes) => {
     res.status(proxyRes.statusCode ?? 502);
     for (const [k, v] of Object.entries(proxyRes.headers)) {
@@ -65,7 +78,11 @@ app.use("/api", (req: Request, res: Response) => {
     }
   });
 
-  req.pipe(proxyReq, { end: true });
+  if (bodyBuf) {
+    proxyReq.end(bodyBuf);
+  } else {
+    req.pipe(proxyReq, { end: true });
+  }
 });
 
 // ─── Serve static web app (mobile/dist) ──────────────────────────────────────

@@ -32468,6 +32468,15 @@ app.use("/api", (req, res) => {
     method: req.method,
     headers: { ...req.headers, host: `127.0.0.1:${PYTHON_PORT}` }
   };
+  const hasBody = req.body !== void 0 && req.body !== null && Object.keys(req.body).length > 0;
+  const bodyBuf = hasBody ? Buffer.from(JSON.stringify(req.body)) : null;
+  if (bodyBuf) {
+    options.headers = {
+      ...options.headers,
+      "content-type": "application/json",
+      "content-length": String(bodyBuf.byteLength)
+    };
+  }
   const proxyReq = http.request(options, (proxyRes) => {
     res.status(proxyRes.statusCode ?? 502);
     for (const [k, v] of Object.entries(proxyRes.headers)) {
@@ -32481,7 +32490,11 @@ app.use("/api", (req, res) => {
       res.status(502).json({ error: "Backend unavailable: " + err.message });
     }
   });
-  req.pipe(proxyReq, { end: true });
+  if (bodyBuf) {
+    proxyReq.end(bodyBuf);
+  } else {
+    req.pipe(proxyReq, { end: true });
+  }
 });
 var MOBILE_DIST = path.resolve(process.cwd(), "artifacts", "mobile", "dist");
 var MIME_TYPES = {
