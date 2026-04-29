@@ -10,6 +10,7 @@ import {
   TextInput,
   RefreshControl,
   Platform,
+  Modal,
 } from "react-native";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -17,6 +18,7 @@ import { Feather } from "@expo/vector-icons";
 import { router } from "expo-router";
 
 import { useColors } from "@/hooks/useColors";
+import { useAuth } from "@/contexts/AuthContext";
 import { apiGet, apiPost } from "@/constants/api";
 import { StatusBadge } from "@/components/StatusBadge";
 import { ProgressBar } from "@/components/ProgressBar";
@@ -133,12 +135,15 @@ export default function TasksScreen() {
   const colors = useColors();
   const insets = useSafeAreaInsets();
   const qc = useQueryClient();
+  const { user } = useAuth();
   const [filter, setFilter] = useState("Все");
   const [search, setSearch] = useState("");
   const [viewMode, setViewMode] = useState<"list" | "kanban">("list");
   const [showForm, setShowForm] = useState(false);
   const [newTaskName, setNewTaskName] = useState("");
   const [newTaskDesc, setNewTaskDesc] = useState("");
+  const [selectedEmpId, setSelectedEmpId] = useState<number | null>(null);
+  const [showEmpPicker, setShowEmpPicker] = useState(false);
   const [creating, setCreating] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
 
@@ -182,12 +187,13 @@ export default function TasksScreen() {
 
   const createTask = async () => {
     if (!newTaskName.trim()) return;
+    if (!selectedEmpId) return;
     setCreating(true);
     try {
       await apiPost("/api/tasks", {
         name: newTaskName.trim(),
         description: newTaskDesc.trim(),
-        emp_id: 1,
+        emp_id: selectedEmpId,
         priority: "Средний",
         category: "Прочее",
         status: "Новая",
@@ -195,6 +201,7 @@ export default function TasksScreen() {
       });
       setNewTaskName("");
       setNewTaskDesc("");
+      setSelectedEmpId(null);
       setShowForm(false);
       qc.invalidateQueries({ queryKey: ["tasks"] });
       qc.invalidateQueries({ queryKey: ["stats"] });
@@ -227,7 +234,10 @@ export default function TasksScreen() {
             <Feather name={viewMode === "list" ? "columns" : "list"} size={18} color={viewMode === "kanban" ? colors.primary : colors.mutedForeground} />
           </TouchableOpacity>
           <TouchableOpacity
-            onPress={() => setShowForm(!showForm)}
+            onPress={() => {
+              setShowForm(!showForm);
+              if (showForm) { setNewTaskName(""); setNewTaskDesc(""); setSelectedEmpId(null); }
+            }}
             style={[styles.addBtn, { backgroundColor: colors.primary }]}
           >
             <Feather name={showForm ? "x" : "plus"} size={20} color="#fff" />
@@ -251,15 +261,90 @@ export default function TasksScreen() {
             onChangeText={setNewTaskDesc}
             style={[styles.input, { backgroundColor: colors.muted, borderRadius: colors.radius / 2, color: colors.foreground }]}
           />
+          {/* Выбор исполнителя */}
+          <TouchableOpacity
+            onPress={() => setShowEmpPicker(true)}
+            style={[styles.empPickerBtn, {
+              backgroundColor: colors.muted,
+              borderRadius: colors.radius / 2,
+              borderWidth: selectedEmpId ? 1.5 : 0,
+              borderColor: selectedEmpId ? colors.primary : "transparent",
+            }]}
+          >
+            {selectedEmpId && empMap[selectedEmpId] ? (
+              <View style={styles.empPickerSelected}>
+                <View style={[styles.empPickerAvatar, { backgroundColor: empMap[selectedEmpId].color || colors.primary }]}>
+                  <Text style={styles.empPickerAvatarText}>
+                    {empMap[selectedEmpId].name.split(" ").slice(0, 2).map((w: string) => w[0]).join("")}
+                  </Text>
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={[styles.empPickerName, { color: colors.foreground }]}>{empMap[selectedEmpId].name}</Text>
+                  <Text style={[styles.empPickerRole, { color: colors.mutedForeground }]}>{empMap[selectedEmpId].role}</Text>
+                </View>
+                <Feather name="check-circle" size={18} color={colors.primary} />
+              </View>
+            ) : (
+              <View style={styles.empPickerPlaceholder}>
+                <Feather name="user" size={16} color={colors.mutedForeground} />
+                <Text style={[styles.empPickerPlaceholderText, { color: colors.mutedForeground }]}>Выбрать исполнителя</Text>
+                <Feather name="chevron-down" size={16} color={colors.mutedForeground} />
+              </View>
+            )}
+          </TouchableOpacity>
+
           <TouchableOpacity
             onPress={createTask}
-            disabled={creating || !newTaskName.trim()}
-            style={[styles.createBtn, { backgroundColor: creating || !newTaskName.trim() ? colors.border : colors.primary, borderRadius: colors.radius / 2 }]}
+            disabled={creating || !newTaskName.trim() || !selectedEmpId}
+            style={[styles.createBtn, {
+              backgroundColor: creating || !newTaskName.trim() || !selectedEmpId ? colors.border : colors.primary,
+              borderRadius: colors.radius / 2,
+            }]}
           >
-            {creating ? <ActivityIndicator size="small" color="#fff" /> : <Text style={styles.createBtnText}>Создать</Text>}
+            {creating ? <ActivityIndicator size="small" color="#fff" /> : <Text style={styles.createBtnText}>Создать задачу</Text>}
           </TouchableOpacity>
         </View>
       )}
+
+      {/* Модальное окно выбора исполнителя */}
+      <Modal visible={showEmpPicker} animationType="slide" transparent onRequestClose={() => setShowEmpPicker(false)}>
+        <View style={styles.modalOverlay}>
+          <View style={[styles.modalSheet, { backgroundColor: colors.card }]}>
+            <View style={[styles.modalHeader, { borderBottomColor: colors.border }]}>
+              <Text style={[styles.modalTitle, { color: colors.foreground }]}>Выбрать исполнителя</Text>
+              <TouchableOpacity onPress={() => setShowEmpPicker(false)}>
+                <Feather name="x" size={22} color={colors.mutedForeground} />
+              </TouchableOpacity>
+            </View>
+            <ScrollView style={styles.modalList} showsVerticalScrollIndicator={false}>
+              {(employees || []).map((emp) => (
+                <TouchableOpacity
+                  key={emp.id}
+                  style={[styles.empRow2, {
+                    backgroundColor: selectedEmpId === emp.id ? colors.primary + "15" : "transparent",
+                    borderRadius: colors.radius / 2,
+                  }]}
+                  onPress={() => { setSelectedEmpId(emp.id); setShowEmpPicker(false); }}
+                >
+                  <View style={[styles.empAvatar2, { backgroundColor: emp.color || colors.primary }]}>
+                    <Text style={styles.empAvatarText2}>
+                      {emp.name.split(" ").slice(0, 2).map((w: string) => w[0]).join("")}
+                    </Text>
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Text style={[styles.empName2, { color: colors.foreground }]}>{emp.name}</Text>
+                    <Text style={[styles.empRole2, { color: colors.mutedForeground }]}>{emp.role}</Text>
+                  </View>
+                  {selectedEmpId === emp.id && (
+                    <Feather name="check" size={18} color={colors.primary} />
+                  )}
+                </TouchableOpacity>
+              ))}
+              <View style={{ height: 30 }} />
+            </ScrollView>
+          </View>
+        </View>
+      </Modal>
 
       {viewMode === "list" && (
         <>
@@ -421,4 +506,27 @@ const styles = StyleSheet.create({
   kanbanDue: { fontSize: 10, fontFamily: "Inter_400Regular" },
   emptyCol: { alignItems: "center", padding: 20 },
   emptyColText: { fontSize: 12, fontFamily: "Inter_400Regular" },
+  // Employee picker (form)
+  empPickerBtn: { padding: 12 },
+  empPickerPlaceholder: { flexDirection: "row", alignItems: "center", gap: 8 },
+  empPickerPlaceholderText: { flex: 1, fontSize: 15, fontFamily: "Inter_400Regular" },
+  empPickerSelected: { flexDirection: "row", alignItems: "center", gap: 10 },
+  empPickerAvatar: { width: 34, height: 34, borderRadius: 17, alignItems: "center", justifyContent: "center" },
+  empPickerAvatarText: { color: "#fff", fontSize: 12, fontFamily: "Inter_700Bold" },
+  empPickerName: { fontSize: 14, fontFamily: "Inter_600SemiBold" },
+  empPickerRole: { fontSize: 12, fontFamily: "Inter_400Regular" },
+  // Modal
+  modalOverlay: { flex: 1, backgroundColor: "rgba(0,0,0,0.45)", justifyContent: "flex-end" },
+  modalSheet: { borderTopLeftRadius: 20, borderTopRightRadius: 20, maxHeight: "80%" },
+  modalHeader: {
+    flexDirection: "row", alignItems: "center", justifyContent: "space-between",
+    padding: 18, borderBottomWidth: 1,
+  },
+  modalTitle: { fontSize: 17, fontFamily: "Inter_700Bold" },
+  modalList: { padding: 12 },
+  empRow2: { flexDirection: "row", alignItems: "center", padding: 10, gap: 12, marginBottom: 4 },
+  empAvatar2: { width: 40, height: 40, borderRadius: 20, alignItems: "center", justifyContent: "center" },
+  empAvatarText2: { color: "#fff", fontSize: 13, fontFamily: "Inter_700Bold" },
+  empName2: { fontSize: 14, fontFamily: "Inter_600SemiBold" },
+  empRole2: { fontSize: 12, fontFamily: "Inter_400Regular" },
 });

@@ -639,6 +639,15 @@ async def create_task(task: TaskCreate):
     db.commit()
     new = row_to_dict(db.execute("SELECT * FROM tasks WHERE id=?", (cur.lastrowid,)).fetchone())
     new["comments"] = []
+    # Уведомление исполнителю
+    if task.emp_id and task.emp_id > 0:
+        due_str = f" (срок: {task.due_date})" if task.due_date else ""
+        db.execute(
+            "INSERT INTO notifications(emp_id, type, title, body) VALUES(?,?,?,?)",
+            (task.emp_id, "task", "Новая задача",
+             f"Вам назначена задача: «{task.name}»{due_str}")
+        )
+        db.commit()
     db.close()
     await ws_manager.broadcast("task_created", new)
     return new
@@ -696,6 +705,35 @@ async def add_task_comment(task_id: int, c: CommentCreate):
     db.close()
     await ws_manager.broadcast("task_comment_added", {"task_id": task_id, "comment": new_c})
     return new_c
+
+# ══════════════════════════════════════════════════════════════════════
+# УВЕДОМЛЕНИЯ
+# ══════════════════════════════════════════════════════════════════════
+@app.get("/api/notifications", tags=["notifications"])
+def get_notifications(emp_id: int = Query(...)):
+    db = get_db()
+    rows = rows_to_list(db.execute(
+        "SELECT * FROM notifications WHERE emp_id=? ORDER BY created_at DESC LIMIT 50",
+        (emp_id,)
+    ).fetchall())
+    db.close()
+    return rows
+
+@app.put("/api/notifications/{notif_id}/read", tags=["notifications"])
+def mark_read(notif_id: int):
+    db = get_db()
+    db.execute("UPDATE notifications SET read=1 WHERE id=?", (notif_id,))
+    db.commit()
+    db.close()
+    return {"ok": True}
+
+@app.put("/api/notifications/read-all", tags=["notifications"])
+def mark_all_read(emp_id: int = Query(...)):
+    db = get_db()
+    db.execute("UPDATE notifications SET read=1 WHERE emp_id=?", (emp_id,))
+    db.commit()
+    db.close()
+    return {"ok": True}
 
 # ══════════════════════════════════════════════════════════════════════
 # ПОСЕЩАЕМОСТЬ / HR
