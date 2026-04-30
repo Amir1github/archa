@@ -2019,19 +2019,39 @@ async def test_1c_connection(cfg: OnecConfig):
     """Проверить подключение к 1С"""
     if not cfg.url:
         raise HTTPException(400, "URL не указан")
+    base = cfg.url.rstrip("/")
+    auth = aiohttp.BasicAuth(cfg.user, cfg.password)
+    timeout = aiohttp.ClientTimeout(total=10)
+    # Список кандидатов: сначала сам URL, потом /ping, потом корень сервиса
+    candidates = [base, f"{base}/ping"]
+    # Если URL содержит /hs/ — попробуем ещё и корень до /hs/
+    if "/hs/" in base:
+        root = base[:base.index("/hs/")]
+        if root not in candidates:
+            candidates.append(root)
+    last_status = None
     try:
-        auth = aiohttp.BasicAuth(cfg.user, cfg.password)
-        timeout = aiohttp.ClientTimeout(total=10)
         async with aiohttp.ClientSession(auth=auth, timeout=timeout) as session:
-            # Пробуем ping или healthcheck 1С
-            async with session.get(f"{cfg.url.rstrip('/')}/ping") as r:
-                if r.status in (200, 204):
-                    return {"ok": True, "message": "Подключение успешно", "status": r.status}
-                return {"ok": False, "message": f"Сервер ответил с кодом {r.status}"}
-    except aiohttp.ClientConnectorError:
+            for url in candidates:
+                try:
+                    async with session.get(url) as r:
+                        last_status = r.status
+                        if r.status in (200, 201, 204):
+                            return {"ok": True, "message": f"Подключение успешно (HTTP {r.status})"}
+                        if r.status in (401, 403):
+                            return {"ok": False, "message": "Сервер доступен, но неверный логин или пароль (HTTP {})".format(r.status)}
+                        if r.status == 404:
+                            continue  # попробуем следующий кандидат
+                        # Любой другой HTTP-ответ — сервер жив
+                        return {"ok": True, "message": f"Сервер отвечает (HTTP {r.status}) — настройте синхронизацию"}
+                except aiohttp.ClientConnectorError:
+                    continue  # следующий кандидат
+        # Ни один кандидат не ответил или все вернули 404
+        if last_status == 404:
+            return {"ok": False, "message": "HTTP 404 — URL не найден. Проверьте путь к HTTP-сервису в 1С"}
         return {"ok": False, "message": "Не удалось подключиться к серверу 1С"}
     except asyncio.TimeoutError:
-        return {"ok": False, "message": "Превышено время ожидания (10 сек)"}
+        return {"ok": False, "message": "Превышено время ожидания (10 сек) — проверьте доступность сервера"}
     except Exception as e:
         return {"ok": False, "message": str(e)[:120]}
 

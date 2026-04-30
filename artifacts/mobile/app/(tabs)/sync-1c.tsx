@@ -293,12 +293,15 @@ export default function Sync1cScreen() {
               <TextInput
                 value={cfgUrl}
                 onChangeText={setCfgUrl}
-                placeholder="http://192.168.1.100/poytakht/hs/api"
+                placeholder="http://192.168.1.100/База/hs/НазваниеСервиса"
                 placeholderTextColor={colors.mutedForeground}
                 autoCapitalize="none"
                 autoCorrect={false}
                 style={[s.input, { color: colors.foreground, backgroundColor: colors.muted, borderRadius: 10 }]}
               />
+              <Text style={{ fontSize: 11, color: colors.mutedForeground, fontFamily: "Inter_400Regular", marginTop: -10, marginBottom: 12, lineHeight: 16 }}>
+                Базовый URL сервиса (без имени метода). Пример: http://localhost/Test_AR/hs/Data
+              </Text>
 
               <Text style={[s.fieldLabel, { color: colors.mutedForeground }]}>Логин 1С</Text>
               <TextInput
