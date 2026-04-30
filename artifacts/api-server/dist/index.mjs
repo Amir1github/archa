@@ -32493,7 +32493,7 @@ app.use("/api", (req, res) => {
   if (bodyBuf) {
     proxyReq.end(bodyBuf);
   } else {
-    req.pipe(proxyReq, { end: true });
+    proxyReq.end();
   }
 });
 var MOBILE_DIST = path.resolve(process.cwd(), "artifacts", "mobile", "dist");

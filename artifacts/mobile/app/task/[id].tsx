@@ -16,6 +16,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Feather } from "@expo/vector-icons";
 
 import { useColors } from "@/hooks/useColors";
+import { useAuth } from "@/contexts/AuthContext";
 import { apiGet, apiPut, apiDelete, apiPost } from "@/constants/api";
 import { StatusBadge } from "@/components/StatusBadge";
 import { ProgressBar } from "@/components/ProgressBar";
@@ -28,6 +29,7 @@ export default function TaskDetailScreen() {
   const colors = useColors();
   const insets = useSafeAreaInsets();
   const qc = useQueryClient();
+  const { user } = useAuth();
   const [comment, setComment] = useState("");
   const [sendingComment, setSendingComment] = useState(false);
   const [updatingStatus, setUpdatingStatus] = useState(false);
@@ -89,7 +91,7 @@ export default function TaskDetailScreen() {
     if (!comment.trim()) return;
     setSendingComment(true);
     try {
-      await apiPost(`/api/tasks/${id}/comments`, { emp_id: 1, text: comment });
+      await apiPost(`/api/tasks/${id}/comments`, { emp_id: user?.id ?? 1, text: comment });
       setComment("");
       qc.invalidateQueries({ queryKey: ["task", id] });
     } catch {
@@ -192,7 +194,8 @@ export default function TaskDetailScreen() {
                   Срок
                 </Text>
                 <Text style={[styles.detailValue, { color: colors.foreground }]}>
-                  {task.due_date}
+                  {task.due_date.split("-").reverse().join(".")}
+                  {task.due_time ? `  ${task.due_time}` : ""}
                 </Text>
               </View>
             )}

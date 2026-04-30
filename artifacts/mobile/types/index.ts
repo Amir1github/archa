@@ -23,6 +23,7 @@ export interface Task {
   priority: "Высокий" | "Средний" | "Низкий";
   category: string;
   due_date?: string;
+  due_time?: string;
   status: "Новая" | "В работе" | "На проверке" | "Выполнена" | "Заблокирована";
   progress: number;
   created_at: string;

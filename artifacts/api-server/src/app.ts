@@ -81,7 +81,9 @@ app.use("/api", (req: Request, res: Response) => {
   if (bodyBuf) {
     proxyReq.end(bodyBuf);
   } else {
-    req.pipe(proxyReq, { end: true });
+    // express.json() already consumed the body stream even for bodyless requests
+    // (DELETE, GET), so we must NOT pipe req — just close the proxy request.
+    proxyReq.end();
   }
 });
 
