@@ -18,6 +18,7 @@ import { useColors } from "@/hooks/useColors";
 function NativeTabLayout() {
   const { user } = useAuth();
   const isRkoUser = user ? (user.role?.toLowerCase().includes("директор") || user.role?.toLowerCase().includes("главный бухгалт")) : false;
+  const isAdmin = user ? (user.is_admin || user.role?.toLowerCase().includes("директор")) : false;
   return (
     <NativeTabs>
       <NativeTabs.Trigger name="index">
@@ -58,6 +59,12 @@ function NativeTabLayout() {
           <Label>РКО</Label>
         </NativeTabs.Trigger>
       )}
+      {isAdmin && (
+        <NativeTabs.Trigger name="sync-1c">
+          <Icon sf={{ default: "arrow.triangle.2.circlepath", selected: "arrow.triangle.2.circlepath" }} />
+          <Label>1С</Label>
+        </NativeTabs.Trigger>
+      )}
       <NativeTabs.Trigger name="profile">
         <Icon sf={{ default: "person.circle", selected: "person.circle.fill" }} />
         <Label>Профиль</Label>
@@ -74,6 +81,7 @@ function ClassicTabLayout() {
   const isWeb = Platform.OS === "web";
   const { user } = useAuth();
   const isRkoUser = user ? (user.role?.toLowerCase().includes("директор") || user.role?.toLowerCase().includes("главный бухгалт")) : false;
+  const isAdmin = user ? (user.is_admin || user.role?.toLowerCase().includes("директор")) : false;
 
   return (
     <Tabs
@@ -182,8 +190,14 @@ function ClassicTabLayout() {
       />
       <Tabs.Screen
         name="employees"
+        options={{ href: null }}
+      />
+      <Tabs.Screen
+        name="sync-1c"
         options={{
-          href: null,
+          title: "1С",
+          href: isAdmin ? undefined : null,
+          tabBarIcon: ({ color }) => <Feather name="refresh-cw" size={20} color={color} />,
         }}
       />
     </Tabs>

@@ -380,6 +380,19 @@ def init_db():
     );
     CREATE INDEX IF NOT EXISTS idx_orders_client ON orders(client_id);
     CREATE INDEX IF NOT EXISTS idx_orders_mgr    ON orders(manager_id);
+
+    -- ── Лог синхронизации с 1С ─────────────────────────────────────
+    CREATE TABLE IF NOT EXISTS sync_log (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        started_at  TEXT    DEFAULT (datetime('now')),
+        finished_at TEXT,
+        status      TEXT    DEFAULT 'running',
+        modules     TEXT    DEFAULT '',
+        errors      TEXT    DEFAULT '',
+        records     INTEGER DEFAULT 0,
+        triggered   TEXT    DEFAULT 'auto'
+    );
+    CREATE INDEX IF NOT EXISTS idx_sync_log_started ON sync_log(started_at);
     """)
     db.commit()
     # ── Миграции (добавляем колонки если их нет) ───────────────────────
@@ -399,6 +412,23 @@ def init_db():
     ]:
         try:
             db.execute(f"ALTER TABLE tasks ADD COLUMN {col} {definition}")
+            db.commit()
+        except Exception:
+            pass
+    for col, definition in [
+        ("inn",    "TEXT DEFAULT ''"),
+        ("source", "TEXT DEFAULT 'manual'"),
+    ]:
+        try:
+            db.execute(f"ALTER TABLE clients ADD COLUMN {col} {definition}")
+            db.commit()
+        except Exception:
+            pass
+    for col, definition in [
+        ("source", "TEXT DEFAULT 'manual'"),
+    ]:
+        try:
+            db.execute(f"ALTER TABLE employees ADD COLUMN {col} {definition}")
             db.commit()
         except Exception:
             pass
@@ -1722,20 +1752,42 @@ async def update_setting(s: SettingUpdate):
 # ══════════════════════════════════════════════════════════════════════
 # СИНХРОНИЗАЦИЯ С 1С
 # ══════════════════════════════════════════════════════════════════════
-async def sync_from_1c():
-    if not ONEC_URL:
+
+def _get_onec_settings() -> tuple[str, str, str]:
+    """Читает URL/логин/пароль из БД или переменных окружения."""
+    db = get_db()
+    rows = {r["key"]: r["value"] for r in db.execute("SELECT key,value FROM settings WHERE key IN ('onec_url','onec_user','onec_pass')").fetchall()}
+    db.close()
+    url  = rows.get("onec_url",  ONEC_URL)
+    user = rows.get("onec_user", ONEC_USER)
+    pwd  = rows.get("onec_pass", ONEC_PASS)
+    return url, user, pwd
+
+async def sync_from_1c(triggered: str = "auto"):
+    url, user, pwd = _get_onec_settings()
+    if not url:
         log.debug("1С не настроена — пропускаем синхронизацию")
         return False
 
-    auth    = aiohttp.BasicAuth(ONEC_USER, ONEC_PASS)
-    timeout = aiohttp.ClientTimeout(total=20)
+    # Запись в лог
+    db = get_db()
+    log_id = db.execute(
+        "INSERT INTO sync_log(triggered) VALUES(?) RETURNING id", (triggered,)
+    ).fetchone()["id"]
+    db.commit()
+    db.close()
+
+    auth    = aiohttp.BasicAuth(user, pwd)
+    timeout = aiohttp.ClientTimeout(total=30)
     synced  = []
+    errors  = []
+    total_records = 0
 
     async with aiohttp.ClientSession(auth=auth, timeout=timeout) as session:
 
         # ── Дебиторы ──────────────────────────────────────────────────
         try:
-            async with session.get(f"{ONEC_URL}/debtors/list") as r:
+            async with session.get(f"{url}/debtors/list") as r:
                 if r.status == 200:
                     data = await r.json(content_type=None)
                     db = get_db()
@@ -1744,20 +1796,24 @@ async def sync_from_1c():
                             INSERT INTO debtors(id,name,inn,manager_id,debt,overdue_days,due_date,invoice_date,last_payment,source,updated_at)
                             VALUES(?,?,?,?,?,?,?,?,?,'1c',datetime('now'))
                             ON CONFLICT(id) DO UPDATE SET
+                                name=excluded.name, inn=excluded.inn,
                                 debt=excluded.debt, overdue_days=excluded.overdue_days,
                                 last_payment=excluded.last_payment, updated_at=datetime('now')
                         """, (d.get("id",""), d.get("name",""), d.get("inn",""), d.get("managerId",1),
                               d.get("debt",0), d.get("overdueDays",0), d.get("dueDate",""),
                               d.get("invoiceDate",""), d.get("lastPayment","")))
-                    db.commit()
-                    db.close()
-                    synced.append(f"дебиторы: {len(data)}")
+                    db.commit(); db.close()
+                    synced.append(f"Дебиторы ({len(data)})")
+                    total_records += len(data)
+                else:
+                    errors.append(f"Дебиторы: HTTP {r.status}")
         except Exception as e:
             log.warning(f"1С дебиторы: {e}")
+            errors.append(f"Дебиторы: {str(e)[:80]}")
 
         # ── Склад ─────────────────────────────────────────────────────
         try:
-            async with session.get(f"{ONEC_URL}/warehouse/remains") as r:
+            async with session.get(f"{url}/warehouse/remains") as r:
                 if r.status == 200:
                     data = await r.json(content_type=None)
                     db = get_db()
@@ -1766,47 +1822,109 @@ async def sync_from_1c():
                             INSERT INTO warehouse(id,name,sku,category,qty,unit,min_qty,price,warehouse_name,supplier,source,updated_at)
                             VALUES(?,?,?,?,?,?,?,?,?,?,'1c',datetime('now'))
                             ON CONFLICT(id) DO UPDATE SET
-                                qty=excluded.qty, price=excluded.price, updated_at=datetime('now')
+                                name=excluded.name, qty=excluded.qty,
+                                price=excluded.price, updated_at=datetime('now')
                         """, (item.get("id",""), item.get("name",""), item.get("sku",""),
                               item.get("category","Прочее"), item.get("qty",0), item.get("unit","шт"),
                               item.get("minQty",0), item.get("price",0), item.get("warehouse","Склад №1"),
                               item.get("supplier","")))
-                    db.commit()
-                    db.close()
-                    synced.append(f"склад: {len(data)}")
+                    db.commit(); db.close()
+                    synced.append(f"Склад ({len(data)})")
+                    total_records += len(data)
+                else:
+                    errors.append(f"Склад: HTTP {r.status}")
         except Exception as e:
             log.warning(f"1С склад: {e}")
+            errors.append(f"Склад: {str(e)[:80]}")
 
-        # ── Продажи план/факт ──────────────────────────────────────────
+        # ── Клиенты / Контрагенты ─────────────────────────────────────
         try:
-            async with session.get(f"{ONEC_URL}/sales/planfact") as r:
+            async with session.get(f"{url}/counterparties/list") as r:
                 if r.status == 200:
                     data = await r.json(content_type=None)
                     db = get_db()
+                    for c in data:
+                        # Маппинг из типового формата 1С
+                        cat = {"Оптовый": "Опт", "Розничный": "Розница", "VIP": "VIP"}.get(c.get("type",""), "Розница")
+                        db.execute("""
+                            INSERT INTO clients(id,name,phone,address,contact,category,inn,source,created_at)
+                            VALUES(?,?,?,?,?,?,?,'1c',datetime('now'))
+                            ON CONFLICT(id) DO UPDATE SET
+                                name=excluded.name, phone=excluded.phone,
+                                address=excluded.address, contact=excluded.contact,
+                                category=excluded.category, inn=excluded.inn
+                        """, (c.get("id",None), c.get("name",""), c.get("phone",""),
+                              c.get("address",""), c.get("contactPerson",""), cat,
+                              c.get("inn","")))
+                    db.commit(); db.close()
+                    synced.append(f"Клиенты ({len(data)})")
+                    total_records += len(data)
+                else:
+                    errors.append(f"Клиенты: HTTP {r.status}")
+        except Exception as e:
+            log.warning(f"1С клиенты: {e}")
+            errors.append(f"Клиенты: {str(e)[:80]}")
+
+        # ── Сотрудники ────────────────────────────────────────────────
+        try:
+            async with session.get(f"{url}/employees/list") as r:
+                if r.status == 200:
+                    data = await r.json(content_type=None)
+                    db = get_db()
+                    for e in data:
+                        # Обновляем только зарплату и телефон — не трогаем роль/цвет которые настроены вручную
+                        db.execute("""
+                            INSERT INTO employees(id,name,role,salary,phone,source)
+                            VALUES(?,?,?,?,?,'1c')
+                            ON CONFLICT(id) DO UPDATE SET
+                                salary=excluded.salary, phone=excluded.phone
+                        """, (e.get("id",None), e.get("name",""), e.get("position",""),
+                              e.get("salary",0), e.get("phone","")))
+                    db.commit(); db.close()
+                    synced.append(f"Сотрудники ({len(data)})")
+                    total_records += len(data)
+                else:
+                    errors.append(f"Сотрудники: HTTP {r.status}")
+        except Exception as e:
+            log.warning(f"1С сотрудники: {e}")
+            errors.append(f"Сотрудники: {str(e)[:80]}")
+
+        # ── Продажи план/факт ──────────────────────────────────────────
+        try:
+            async with session.get(f"{url}/sales/planfact") as r:
+                if r.status == 200:
+                    data = await r.json(content_type=None)
+                    db = get_db()
+                    cnt = 0
                     for period in ["day","week","month","quarter","year"]:
                         if period in data:
                             for mgr_id, amount in (data[period].items() if isinstance(data[period], dict) else []):
                                 db.execute("""INSERT INTO sales_facts(manager_id,period,amount,updated_at) VALUES(?,?,?,datetime('now'))
                                     ON CONFLICT(manager_id,period) DO UPDATE SET amount=excluded.amount,updated_at=datetime('now')""",
                                     (int(mgr_id), period, amount))
-                    db.commit()
-                    db.close()
-                    synced.append("продажи факт")
+                                cnt += 1
+                    db.commit(); db.close()
+                    synced.append(f"Продажи факт ({cnt})")
+                    total_records += cnt
+                else:
+                    errors.append(f"Продажи: HTTP {r.status}")
         except Exception as e:
             log.warning(f"1С продажи: {e}")
+            errors.append(f"Продажи: {str(e)[:80]}")
 
         # ── История продаж для прогноза ────────────────────────────────
         try:
-            async with session.get(f"{ONEC_URL}/sales/history") as r:
+            async with session.get(f"{url}/sales/history") as r:
                 if r.status == 200:
                     data = await r.json(content_type=None)
                     db = get_db()
-                    # data = {"yearly":[{year, category, amount},...], "nomenclature":[...]}
+                    cnt = 0
                     for row in data.get("yearly", []):
                         db.execute("""
                             INSERT OR REPLACE INTO sales_history(year,month,category,amount,source)
                             VALUES(?,NULL,?,?,'1c')
                         """, (row.get("year"), row.get("category",""), row.get("amount",0)))
+                        cnt += 1
                     for nom in data.get("nomenclature", []):
                         db.execute("""
                             INSERT OR REPLACE INTO sales_history
@@ -1814,22 +1932,37 @@ async def sync_from_1c():
                             VALUES(?,?,?,?,?,?,?,?,'1c')
                         """, (nom.get("year"), nom.get("month"), nom.get("id",""), nom.get("name",""),
                               nom.get("cat",""), nom.get("supplier",""), nom.get("amount",0), nom.get("qty",0)))
-                    db.commit()
-                    db.close()
-                    synced.append("история продаж")
+                        cnt += 1
+                    db.commit(); db.close()
+                    synced.append(f"История продаж ({cnt})")
+                    total_records += cnt
+                else:
+                    errors.append(f"История: HTTP {r.status}")
         except Exception as e:
             log.warning(f"1С история: {e}")
+            errors.append(f"История: {str(e)[:80]}")
 
+    # Обновить лог
+    status = "success" if not errors else ("partial" if synced else "error")
+    db = get_db()
+    db.execute("""
+        UPDATE sync_log SET finished_at=datetime('now'), status=?, modules=?, errors=?, records=?
+        WHERE id=?
+    """, (status, ", ".join(synced), "; ".join(errors), total_records, log_id))
     if synced:
-        sync_time = datetime.now().strftime("%H:%M")
-        db = get_db()
+        sync_time = datetime.now().strftime("%d.%m %H:%M")
         db.execute("INSERT INTO settings(key,value,updated) VALUES('last_1c_sync',?,datetime('now')) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated=datetime('now')",
             (sync_time,))
-        db.commit()
-        db.close()
-        await ws_manager.broadcast("sync_complete", {"source": "1c", "time": sync_time, "modules": synced})
+    db.commit(); db.close()
+
+    if synced:
+        await ws_manager.broadcast("sync_complete", {
+            "source": "1c", "time": datetime.now().strftime("%d.%m %H:%M"),
+            "modules": synced, "errors": errors, "records": total_records,
+        })
         log.info(f"✓ 1С синхронизирован: {', '.join(synced)}")
         return True
+    log.warning(f"✗ 1С синхронизация не выполнена. Ошибки: {errors}")
     return False
 
 async def sync_1c_loop():
@@ -1861,22 +1994,70 @@ async def daily_scheduler():
         log.info("Дневное обновление: просрочка дебиторов пересчитана")
         await ws_manager.broadcast("daily_update", {"date": date.today().isoformat()})
 
+class OnecConfig(BaseModel):
+    url:  str
+    user: str = "Администратор"
+    password: str = ""
+    interval: int = 600
+
 @app.post("/api/sync/1c", tags=["sync"])
 async def manual_sync():
     """Ручной запуск синхронизации с 1С"""
-    asyncio.create_task(sync_from_1c())
+    asyncio.create_task(sync_from_1c(triggered="manual"))
     return {"ok": True, "message": "Синхронизация запущена"}
+
+@app.post("/api/sync/1c/test", tags=["sync"])
+async def test_1c_connection(cfg: OnecConfig):
+    """Проверить подключение к 1С"""
+    if not cfg.url:
+        raise HTTPException(400, "URL не указан")
+    try:
+        auth = aiohttp.BasicAuth(cfg.user, cfg.password)
+        timeout = aiohttp.ClientTimeout(total=10)
+        async with aiohttp.ClientSession(auth=auth, timeout=timeout) as session:
+            # Пробуем ping или healthcheck 1С
+            async with session.get(f"{cfg.url.rstrip('/')}/ping") as r:
+                if r.status in (200, 204):
+                    return {"ok": True, "message": "Подключение успешно", "status": r.status}
+                return {"ok": False, "message": f"Сервер ответил с кодом {r.status}"}
+    except aiohttp.ClientConnectorError:
+        return {"ok": False, "message": "Не удалось подключиться к серверу 1С"}
+    except asyncio.TimeoutError:
+        return {"ok": False, "message": "Превышено время ожидания (10 сек)"}
+    except Exception as e:
+        return {"ok": False, "message": str(e)[:120]}
+
+@app.put("/api/sync/1c/config", tags=["sync"])
+async def save_1c_config(cfg: OnecConfig):
+    """Сохранить настройки подключения к 1С"""
+    db = get_db()
+    for key, val in [("onec_url", cfg.url.rstrip("/")), ("onec_user", cfg.user),
+                     ("onec_pass", cfg.password), ("sync_interval", str(cfg.interval))]:
+        db.execute("INSERT INTO settings(key,value,updated) VALUES(?,?,datetime('now')) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated=datetime('now')",
+                   (key, val))
+    db.commit(); db.close()
+    return {"ok": True}
 
 @app.get("/api/sync/status", tags=["sync"])
 def sync_status():
     db = get_db()
-    last = db.execute("SELECT value FROM settings WHERE key='last_1c_sync'").fetchone()
+    cfg = {r["key"]: r["value"] for r in db.execute(
+        "SELECT key,value FROM settings WHERE key IN ('last_1c_sync','onec_url','onec_user','sync_interval')"
+    ).fetchall()}
+    logs = rows_to_list(db.execute(
+        "SELECT id,started_at,finished_at,status,modules,errors,records,triggered FROM sync_log ORDER BY id DESC LIMIT 20"
+    ).fetchall())
+    running = db.execute("SELECT id FROM sync_log WHERE status='running'").fetchone()
     db.close()
+    url = cfg.get("onec_url", ONEC_URL)
     return {
-        "last_sync":       last["value"] if last else None,
-        "onec_configured": bool(ONEC_URL),
-        "onec_url":        ONEC_URL[:30] + "..." if len(ONEC_URL) > 30 else ONEC_URL,
-        "sync_interval":   SYNC_INTERVAL,
+        "last_sync":       cfg.get("last_1c_sync"),
+        "onec_configured": bool(url),
+        "onec_url":        (url[:40] + "...") if len(url) > 40 else url,
+        "onec_user":       cfg.get("onec_user", ONEC_USER),
+        "sync_interval":   int(cfg.get("sync_interval", SYNC_INTERVAL)),
+        "is_running":      bool(running),
+        "logs":            logs,
     }
 
 # ══════════════════════════════════════════════════════════════════════
