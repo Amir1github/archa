@@ -19,6 +19,7 @@ import { router } from "expo-router";
 
 import { useColors } from "@/hooks/useColors";
 import { useAuth } from "@/contexts/AuthContext";
+import { usePermissions } from "@/hooks/usePermissions";
 import { apiGet, apiPost } from "@/constants/api";
 import { StatusBadge } from "@/components/StatusBadge";
 import { ProgressBar } from "@/components/ProgressBar";
@@ -73,7 +74,9 @@ function TaskCardItem({ task, emp, colors, onPress }: { task: Task; emp?: Employ
         ) : <View />}
         <View style={styles.footerRight}>
           {task.due_date ? (
-            <Text style={[styles.dueDate, { color: isOverdue ? colors.danger : colors.mutedForeground }]}>{fmtDate(task.due_date)}</Text>
+            <Text style={[styles.dueDate, { color: isOverdue ? colors.danger : colors.mutedForeground }]}>
+              {fmtDate(task.due_date)}{(task as any).due_time ? ` ${(task as any).due_time}` : ""}
+            </Text>
           ) : null}
           <StatusBadge status={task.status} />
         </View>
@@ -131,17 +134,26 @@ function KanbanColumn({ status, tasks, empMap, colors, onPress }: { status: stri
 
 const MemoKanbanColumn = React.memo(KanbanColumn);
 
+function todayISO() { return new Date().toISOString().split("T")[0]; }
+function addDays(n: number) {
+  const d = new Date(); d.setDate(d.getDate() + n);
+  return d.toISOString().split("T")[0];
+}
+
 export default function TasksScreen() {
   const colors = useColors();
   const insets = useSafeAreaInsets();
   const qc = useQueryClient();
   const { user } = useAuth();
+  const { can } = usePermissions();
   const [filter, setFilter] = useState("Все");
   const [search, setSearch] = useState("");
   const [viewMode, setViewMode] = useState<"list" | "kanban">("list");
   const [showForm, setShowForm] = useState(false);
   const [newTaskName, setNewTaskName] = useState("");
   const [newTaskDesc, setNewTaskDesc] = useState("");
+  const [newDueDate, setNewDueDate] = useState("");
+  const [newDueTime, setNewDueTime] = useState("");
   const [selectedEmpId, setSelectedEmpId] = useState<number | null>(null);
   const [showEmpPicker, setShowEmpPicker] = useState(false);
   const [creating, setCreating] = useState(false);
@@ -164,18 +176,24 @@ export default function TasksScreen() {
     return m;
   }, [employees]);
 
-  const filtered = useMemo(() => (tasks || []).filter((t) => {
+  const visibleTasks = useMemo(() => {
+    if (!tasks) return [];
+    if (can("tasks.view_all")) return tasks;
+    return tasks.filter((t) => t.emp_id === user?.id);
+  }, [tasks, can, user]);
+
+  const filtered = useMemo(() => visibleTasks.filter((t) => {
     if (filter !== "Все" && t.status !== filter) return false;
     if (search && !t.name.toLowerCase().includes(search.toLowerCase())) return false;
     return true;
-  }), [tasks, filter, search]);
+  }), [visibleTasks, filter, search]);
 
   const kanbanGroups = useMemo(() => {
     const groups: Record<string, Task[]> = {};
     STATUSES.forEach((s) => { groups[s] = []; });
-    (tasks || []).forEach((t) => { if (groups[t.status]) groups[t.status].push(t); });
+    visibleTasks.forEach((t) => { if (groups[t.status]) groups[t.status].push(t); });
     return groups;
-  }, [tasks]);
+  }, [visibleTasks]);
 
   const handlePress = useCallback((id: number) => { router.push(`/task/${id}`); }, []);
 
@@ -196,11 +214,15 @@ export default function TasksScreen() {
         emp_id: selectedEmpId,
         priority: "Средний",
         category: "Прочее",
+        due_date: newDueDate || null,
+        due_time: newDueTime || null,
         status: "Новая",
         progress: 0,
       });
       setNewTaskName("");
       setNewTaskDesc("");
+      setNewDueDate("");
+      setNewDueTime("");
       setSelectedEmpId(null);
       setShowForm(false);
       qc.invalidateQueries({ queryKey: ["tasks"] });
@@ -233,15 +255,21 @@ export default function TasksScreen() {
           >
             <Feather name={viewMode === "list" ? "columns" : "list"} size={18} color={viewMode === "kanban" ? colors.primary : colors.mutedForeground} />
           </TouchableOpacity>
-          <TouchableOpacity
-            onPress={() => {
-              setShowForm(!showForm);
-              if (showForm) { setNewTaskName(""); setNewTaskDesc(""); setSelectedEmpId(null); }
-            }}
-            style={[styles.addBtn, { backgroundColor: colors.primary }]}
-          >
-            <Feather name={showForm ? "x" : "plus"} size={20} color="#fff" />
-          </TouchableOpacity>
+          {can("tasks.create") && (
+            <TouchableOpacity
+              onPress={() => {
+                setShowForm(!showForm);
+                if (showForm) {
+                  setNewTaskName(""); setNewTaskDesc("");
+                  setNewDueDate(""); setNewDueTime("");
+                  setSelectedEmpId(null);
+                }
+              }}
+              style={[styles.addBtn, { backgroundColor: colors.primary }]}
+            >
+              <Feather name={showForm ? "x" : "plus"} size={20} color="#fff" />
+            </TouchableOpacity>
+          )}
         </View>
       </View>
 
@@ -261,6 +289,57 @@ export default function TasksScreen() {
             onChangeText={setNewTaskDesc}
             style={[styles.input, { backgroundColor: colors.muted, borderRadius: colors.radius / 2, color: colors.foreground }]}
           />
+          {/* Срок выполнения + Время */}
+          <View style={styles.dateTimeRow}>
+            <View style={{ flex: 1 }}>
+              <Text style={[styles.fieldLabel, { color: colors.mutedForeground }]}>Срок</Text>
+              <View style={styles.quickDates}>
+                {[
+                  { label: "Сег.", date: todayISO() },
+                  { label: "Зав.", date: addDays(1) },
+                  { label: "3 дня", date: addDays(3) },
+                  { label: "Нед.", date: addDays(7) },
+                ].map(({ label, date }) => (
+                  <TouchableOpacity
+                    key={label}
+                    onPress={() => setNewDueDate(date)}
+                    style={[styles.quickDateBtn, {
+                      backgroundColor: newDueDate === date ? colors.primary : colors.muted,
+                      borderRadius: 8,
+                    }]}
+                  >
+                    <Text style={[styles.quickDateText, { color: newDueDate === date ? "#fff" : colors.mutedForeground }]}>
+                      {label}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+              {newDueDate ? (
+                <View style={styles.dateRow}>
+                  <Text style={[styles.dateValue, { color: colors.foreground }]}>
+                    {newDueDate.split("-").reverse().join(".")}
+                  </Text>
+                  <TouchableOpacity onPress={() => setNewDueDate("")}>
+                    <Feather name="x" size={14} color={colors.mutedForeground} />
+                  </TouchableOpacity>
+                </View>
+              ) : null}
+            </View>
+            <View style={styles.timeSep} />
+            <View style={{ width: 90 }}>
+              <Text style={[styles.fieldLabel, { color: colors.mutedForeground }]}>Время</Text>
+              <TextInput
+                placeholder="09:00"
+                placeholderTextColor={colors.mutedForeground}
+                value={newDueTime}
+                onChangeText={setNewDueTime}
+                keyboardType="numbers-and-punctuation"
+                maxLength={5}
+                style={[styles.timeInput, { backgroundColor: colors.muted, borderRadius: 8, color: colors.foreground }]}
+              />
+            </View>
+          </View>
+
           {/* Выбор исполнителя */}
           <TouchableOpacity
             onPress={() => setShowEmpPicker(true)}
@@ -506,6 +585,16 @@ const styles = StyleSheet.create({
   kanbanDue: { fontSize: 10, fontFamily: "Inter_400Regular" },
   emptyCol: { alignItems: "center", padding: 20 },
   emptyColText: { fontSize: 12, fontFamily: "Inter_400Regular" },
+  // Date/time fields
+  dateTimeRow: { flexDirection: "row", gap: 10, alignItems: "flex-start" },
+  fieldLabel: { fontSize: 11, fontFamily: "Inter_500Medium", marginBottom: 6, textTransform: "uppercase", letterSpacing: 0.5 },
+  quickDates: { flexDirection: "row", gap: 5 },
+  quickDateBtn: { paddingHorizontal: 8, paddingVertical: 5 },
+  quickDateText: { fontSize: 11, fontFamily: "Inter_500Medium" },
+  dateRow: { flexDirection: "row", alignItems: "center", gap: 6, marginTop: 6 },
+  dateValue: { fontSize: 13, fontFamily: "Inter_600SemiBold" },
+  timeSep: { width: 1, backgroundColor: "transparent", marginTop: 20 },
+  timeInput: { padding: 10, fontSize: 15, fontFamily: "Inter_400Regular", textAlign: "center" },
   // Employee picker (form)
   empPickerBtn: { padding: 12 },
   empPickerPlaceholder: { flexDirection: "row", alignItems: "center", gap: 8 },

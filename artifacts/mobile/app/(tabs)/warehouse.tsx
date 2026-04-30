@@ -11,6 +11,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Feather } from "@expo/vector-icons";
 
 import { useColors } from "@/hooks/useColors";
+import { usePermissions } from "@/hooks/usePermissions";
 import { apiGet, apiPost, apiPut, apiDelete } from "@/constants/api";
 import { EmptyState } from "@/components/EmptyState";
 import type { WarehouseItem } from "@/types";
@@ -493,6 +494,7 @@ export default function WarehouseScreen() {
   const colors = useColors();
   const insets = useSafeAreaInsets();
   const queryClient = useQueryClient();
+  const { can } = usePermissions();
   const [search, setSearch] = useState("");
   const [categoryFilter, setCategoryFilter] = useState("Все");
   const [selectedItem, setSelectedItem] = useState<WarehouseItem | null>(null);
@@ -550,12 +552,14 @@ export default function WarehouseScreen() {
             <Text style={[styles.alertText, { color: colors.danger }]}>{alertCount} тревог</Text>
           </View>
         )}
-        <TouchableOpacity
-          onPress={() => setShowAdd(true)}
-          style={[styles.addBtn, { backgroundColor: colors.primary }]}
-        >
-          <Feather name="plus" size={22} color="#fff" />
-        </TouchableOpacity>
+        {can("warehouse.manage") && (
+          <TouchableOpacity
+            onPress={() => setShowAdd(true)}
+            style={[styles.addBtn, { backgroundColor: colors.primary }]}
+          >
+            <Feather name="plus" size={22} color="#fff" />
+          </TouchableOpacity>
+        )}
       </View>
 
       {/* Search */}

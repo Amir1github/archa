@@ -289,13 +289,21 @@ def init_db():
     db.commit()
     # ── Миграции (добавляем колонки если их нет) ───────────────────────
     for col, definition in [
-        ("phone",  "TEXT DEFAULT ''"),
-        ("bio",    "TEXT DEFAULT ''"),
-        ("avatar", "TEXT DEFAULT ''"),
-        ("pin",    "TEXT DEFAULT NULL"),
+        ("phone",    "TEXT DEFAULT ''"),
+        ("bio",      "TEXT DEFAULT ''"),
+        ("avatar",   "TEXT DEFAULT ''"),
+        ("pin",      "TEXT DEFAULT NULL"),
     ]:
         try:
             db.execute(f"ALTER TABLE employees ADD COLUMN {col} {definition}")
+            db.commit()
+        except Exception:
+            pass
+    for col, definition in [
+        ("due_time", "TEXT DEFAULT ''"),
+    ]:
+        try:
+            db.execute(f"ALTER TABLE tasks ADD COLUMN {col} {definition}")
             db.commit()
         except Exception:
             pass
@@ -412,6 +420,7 @@ class TaskCreate(BaseModel):
     priority: str = "Средний"
     category: str = "Прочее"
     due_date: Optional[str] = None
+    due_time: Optional[str] = None
     status: str = "Новая"
     progress: int = Field(0, ge=0, le=100)
 
@@ -422,6 +431,7 @@ class TaskUpdate(BaseModel):
     priority: Optional[str] = None
     category: Optional[str] = None
     due_date: Optional[str] = None
+    due_time: Optional[str] = None
     status: Optional[str] = None
     progress: Optional[int] = None
 
@@ -633,15 +643,19 @@ def get_tasks(
 async def create_task(task: TaskCreate):
     db = get_db()
     cur = db.execute(
-        "INSERT INTO tasks(name,description,emp_id,priority,category,due_date,status,progress) VALUES(?,?,?,?,?,?,?,?)",
-        (task.name, task.description, task.emp_id, task.priority, task.category, task.due_date, task.status, task.progress)
+        "INSERT INTO tasks(name,description,emp_id,priority,category,due_date,due_time,status,progress) VALUES(?,?,?,?,?,?,?,?,?)",
+        (task.name, task.description, task.emp_id, task.priority, task.category,
+         task.due_date, task.due_time or "", task.status, task.progress)
     )
     db.commit()
     new = row_to_dict(db.execute("SELECT * FROM tasks WHERE id=?", (cur.lastrowid,)).fetchone())
     new["comments"] = []
     # Уведомление исполнителю
     if task.emp_id and task.emp_id > 0:
-        due_str = f" (срок: {task.due_date})" if task.due_date else ""
+        parts = []
+        if task.due_date: parts.append(f"срок: {task.due_date}")
+        if task.due_time: parts.append(f"время: {task.due_time}")
+        due_str = f" ({', '.join(parts)})" if parts else ""
         db.execute(
             "INSERT INTO notifications(emp_id, type, title, body) VALUES(?,?,?,?)",
             (task.emp_id, "task", "Новая задача",

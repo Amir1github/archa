@@ -8,6 +8,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Feather } from "@expo/vector-icons";
 
 import { useColors } from "@/hooks/useColors";
+import { usePermissions } from "@/hooks/usePermissions";
 import { apiGet, apiPut } from "@/constants/api";
 import type { Employee } from "@/types";
 
@@ -30,6 +31,7 @@ export default function SalesScreen() {
   const colors = useColors();
   const insets = useSafeAreaInsets();
   const queryClient = useQueryClient();
+  const { can } = usePermissions();
 
   const [activeTab, setActiveTab] = useState<TabKey>("analytics");
   const [periodType, setPeriodType] = useState<PeriodType>("month");
@@ -122,6 +124,7 @@ export default function SalesScreen() {
   const overallPct = totalPlan > 0 ? Math.round((totalFact / totalPlan) * 100) : 0;
 
   function startEdit(manager_id: number, period: string) {
+    if (!can("sales.manage")) return;
     const key = `${manager_id}_${period}`;
     setEditValue(String(planMap[key] || 0));
     setEditingPlan({ manager_id, period });
@@ -394,11 +397,15 @@ export default function SalesScreen() {
                                   <Feather name="x" size={16} color={colors.mutedForeground} />
                                 </TouchableOpacity>
                               </View>
-                            ) : (
+                            ) : can("sales.manage") ? (
                               <TouchableOpacity onPress={() => startEdit(emp.id, period)} style={styles.planValueRow}>
                                 <Text style={[styles.planValue, { color: colors.foreground }]}>{fmtM(current)}</Text>
                                 <Feather name="edit-2" size={11} color={colors.mutedForeground} />
                               </TouchableOpacity>
+                            ) : (
+                              <View style={styles.planValueRow}>
+                                <Text style={[styles.planValue, { color: colors.foreground }]}>{fmtM(current)}</Text>
+                              </View>
                             )}
                             {fact > 0 && (
                               <Text style={[styles.planFact, { color: pct >= 100 ? colors.success : colors.warning }]}>
