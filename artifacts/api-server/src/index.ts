@@ -19,9 +19,10 @@ const BACKEND_DIR = path.resolve(__dirname, "..", "..", "backend-py");
 
 function startPythonBackend() {
   logger.info({ dir: BACKEND_DIR, port: PYTHON_PORT }, "Starting Python backend");
+  const pythonBin = process.env["PYTHON_BIN"] || "python3";
   const proc = spawn(
-    "uvicorn",
-    ["server:app", "--host", "127.0.0.1", "--port", String(PYTHON_PORT)],
+    pythonBin,
+    ["-m", "uvicorn", "server:app", "--host", "127.0.0.1", "--port", String(PYTHON_PORT)],
     {
       cwd: BACKEND_DIR,
       stdio: ["ignore", "pipe", "pipe"],
