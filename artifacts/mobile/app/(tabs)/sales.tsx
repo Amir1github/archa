@@ -148,24 +148,51 @@ export default function SalesScreen() {
   const PERIODS: PeriodType[] = ["month", "quarter", "year"];
   const PERIOD_LABELS: Record<PeriodType, string> = { month: "Месяц", quarter: "Квартал", year: "Год" };
 
-  const sendFcAI = useCallback(async (msg?: string) => {
-    const text = (msg ?? fcAiInput).trim();
-    if (!text) return;
-    setFcAiMessages((prev) => [...prev, { role: "user", text }]);
-    setFcAiInput("");
-    setFcAiLoading(true);
-    setTimeout(() => fcScrollRef.current?.scrollToEnd({ animated: true }), 100);
-    try {
-      const context = `Данные прогноза: базовый прогноз на год ${fmtM(forecastData.annualBase)}, тренд ${forecastData.trend > 0 ? "+" : ""}${forecastData.trend}%, достоверность ${forecastData.confidence}%, лет данных ${forecastData.histYears}. История продаж по годам: ${Object.keys(historyByYear).map((y) => `${y}: ${fmtM(Object.values(historyByYear[Number(y)]).flat().reduce((s, v) => s + v, 0))}`).join(", ")}. Компания: мебельный завод Пойтахт, Таджикистан, Душанбе.`;
-      const res = await apiPost<{ response: string }>("/api/ai/chat", { message: text, context });
-      setFcAiMessages((prev) => [...prev, { role: "ai", text: res.response }]);
-    } catch {
-      setFcAiMessages((prev) => [...prev, { role: "ai", text: "Ошибка: не удалось получить ответ от AI" }]);
-    } finally {
-      setFcAiLoading(false);
-      setTimeout(() => fcScrollRef.current?.scrollToEnd({ animated: true }), 100);
+  // ── historyByYear must come first: used by forecastData + fcNomData ──
+  const historyByYear = useMemo(() => {
+    const years: Record<number, Record<string, number[]>> = {};
+    history.forEach((h) => {
+      if (!years[h.year]) years[h.year] = {};
+      if (!years[h.year][h.category]) years[h.year][h.category] = new Array(12).fill(0);
+      years[h.year][h.category][h.month - 1] = h.amount;
+    });
+    return years;
+  }, [history]);
+
+  // ── forecastData must come before fcNomData + sendFcAI ──
+  const forecastData = useMemo(() => {
+    const curYear = new Date().getFullYear();
+    const curMonth = new Date().getMonth();
+    const yearTotals: Record<number, number> = {};
+    history.forEach((h) => {
+      yearTotals[h.year] = (yearTotals[h.year] || 0) + h.amount;
+    });
+    const sortedYears = Object.keys(yearTotals).map(Number).sort();
+    let trend = 0;
+    if (sortedYears.length >= 2) {
+      const last = yearTotals[sortedYears[sortedYears.length - 1]] || 0;
+      const prev = yearTotals[sortedYears[sortedYears.length - 2]] || 0;
+      trend = prev > 0 ? (last - prev) / prev : 0;
     }
-  }, [fcAiInput, forecastData, historyByYear]);
+    const lastYearTotal = yearTotals[curYear - 1] || yearTotals[sortedYears[sortedYears.length - 1]] || 0;
+    const baseAnnual = lastYearTotal * (1 + trend);
+    const monthlyBase = MONTH_NAMES.map((name, i) => {
+      const seasonFactor = [0.065, 0.07, 0.085, 0.09, 0.09, 0.085, 0.08, 0.085, 0.09, 0.095, 0.075, 0.09][i];
+      const base = baseAnnual * seasonFactor;
+      const factThisYear = facts.filter((f) => f.period === `${curYear}-${String(i + 1).padStart(2, "0")}`).reduce((s, f) => s + f.amount, 0);
+      return {
+        name,
+        base: Math.round(base),
+        optimistic: Math.round(base * 1.15),
+        pessimistic: Math.round(base * 0.85),
+        actual: i < curMonth ? factThisYear : null,
+        isFuture: i >= curMonth,
+      };
+    });
+    const annualBase = Math.round(baseAnnual);
+    const confidence = Math.min(95, Math.max(50, 70 + sortedYears.length * 5));
+    return { monthlyBase, annualBase, trend: Math.round(trend * 100), confidence, histYears: sortedYears.length };
+  }, [history, facts]);
 
   const fcNomData = useMemo(() => {
     const cats: Record<string, number> = {};
@@ -219,49 +246,32 @@ export default function SalesScreen() {
     ]},
   ];
 
-  const historyByYear = useMemo(() => {
-    const years: Record<number, Record<string, number[]>> = {};
-    history.forEach((h) => {
-      if (!years[h.year]) years[h.year] = {};
-      if (!years[h.year][h.category]) years[h.year][h.category] = new Array(12).fill(0);
-      years[h.year][h.category][h.month - 1] = h.amount;
-    });
-    return years;
-  }, [history]);
-
-  const forecastData = useMemo(() => {
-    const curYear = new Date().getFullYear();
-    const curMonth = new Date().getMonth();
-    const yearTotals: Record<number, number> = {};
-    history.forEach((h) => {
-      yearTotals[h.year] = (yearTotals[h.year] || 0) + h.amount;
-    });
-    const sortedYears = Object.keys(yearTotals).map(Number).sort();
-    let trend = 0;
-    if (sortedYears.length >= 2) {
-      const last = yearTotals[sortedYears[sortedYears.length - 1]] || 0;
-      const prev = yearTotals[sortedYears[sortedYears.length - 2]] || 0;
-      trend = prev > 0 ? (last - prev) / prev : 0;
+  // ── sendFcAI must come AFTER forecastData + historyByYear ──
+  const sendFcAI = useCallback(async (msg?: string) => {
+    const text = (msg ?? fcAiInput).trim();
+    if (!text) return;
+    const newUserMsg = { role: "user" as const, text };
+    setFcAiMessages((prev) => [...prev, newUserMsg]);
+    setFcAiInput("");
+    setFcAiLoading(true);
+    setTimeout(() => fcScrollRef.current?.scrollToEnd({ animated: true }), 100);
+    try {
+      const forecastCtx = `[Контекст прогноза] Базовый прогноз на год: ${fmtM(forecastData.annualBase)}, тренд: ${forecastData.trend > 0 ? "+" : ""}${forecastData.trend}%, достоверность: ${forecastData.confidence}%, лет данных: ${forecastData.histYears}. История по годам: ${Object.keys(historyByYear).map((y) => `${y}: ${fmtM(Object.values(historyByYear[Number(y)]).flat().reduce((s, v) => s + v, 0))}`).join(", ")}.`;
+      // Build full messages array including history; inject forecast context on first message
+      const allPrev = fcAiMessages;
+      const messages = [
+        ...(allPrev.length === 0 ? [] : allPrev.map((m) => ({ role: m.role === "ai" ? "assistant" : "user", content: m.text }))),
+        { role: "user", content: allPrev.length === 0 ? `${forecastCtx}\n\n${text}` : text },
+      ];
+      const res = await apiPost<{ response: string }>("/api/ai-chat", { messages });
+      setFcAiMessages((prev) => [...prev, { role: "ai", text: res.response }]);
+    } catch {
+      setFcAiMessages((prev) => [...prev, { role: "ai", text: "Ошибка: не удалось получить ответ от AI" }]);
+    } finally {
+      setFcAiLoading(false);
+      setTimeout(() => fcScrollRef.current?.scrollToEnd({ animated: true }), 100);
     }
-    const lastYearTotal = yearTotals[curYear - 1] || yearTotals[sortedYears[sortedYears.length - 1]] || 0;
-    const baseAnnual = lastYearTotal * (1 + trend);
-    const monthlyBase = MONTH_NAMES.map((name, i) => {
-      const seasonFactor = [0.065, 0.07, 0.085, 0.09, 0.09, 0.085, 0.08, 0.085, 0.09, 0.095, 0.075, 0.09][i];
-      const base = baseAnnual * seasonFactor;
-      const factThisYear = facts.filter((f) => f.period === `${curYear}-${String(i + 1).padStart(2, "0")}`).reduce((s, f) => s + f.amount, 0);
-      return {
-        name,
-        base: Math.round(base),
-        optimistic: Math.round(base * 1.15),
-        pessimistic: Math.round(base * 0.85),
-        actual: i < curMonth ? factThisYear : null,
-        isFuture: i >= curMonth,
-      };
-    });
-    const annualBase = Math.round(baseAnnual);
-    const confidence = Math.min(95, Math.max(50, 70 + sortedYears.length * 5));
-    return { monthlyBase, annualBase, trend: Math.round(trend * 100), confidence, histYears: sortedYears.length };
-  }, [history, facts]);
+  }, [fcAiInput, fcAiMessages, forecastData, historyByYear]);
 
   return (
     <View style={[styles.container, { backgroundColor: colors.background }]}>
