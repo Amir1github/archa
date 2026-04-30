@@ -1966,11 +1966,19 @@ async def sync_from_1c(triggered: str = "auto"):
     return False
 
 async def sync_1c_loop():
-    """Автоматическая синхронизация с 1С каждые N секунд"""
+    """Автоматическая синхронизация с 1С каждые N секунд (интервал из БД)"""
     await asyncio.sleep(30)  # Подождать старта сервера
     while True:
         await sync_from_1c()
-        await asyncio.sleep(SYNC_INTERVAL)
+        # Читаем актуальный интервал из БД (пользователь мог изменить через приложение)
+        try:
+            db = get_db()
+            row = db.execute("SELECT value FROM settings WHERE key='sync_interval'").fetchone()
+            db.close()
+            interval = int(row["value"]) if row else SYNC_INTERVAL
+        except Exception:
+            interval = SYNC_INTERVAL
+        await asyncio.sleep(max(60, interval))  # минимум 60 сек
 
 async def daily_scheduler():
     """Ежедневные задачи — в 06:00 каждый день"""
@@ -2051,13 +2059,14 @@ def sync_status():
     db.close()
     url = cfg.get("onec_url", ONEC_URL)
     return {
-        "last_sync":       cfg.get("last_1c_sync"),
-        "onec_configured": bool(url),
-        "onec_url":        (url[:40] + "...") if len(url) > 40 else url,
-        "onec_user":       cfg.get("onec_user", ONEC_USER),
-        "sync_interval":   int(cfg.get("sync_interval", SYNC_INTERVAL)),
-        "is_running":      bool(running),
-        "logs":            logs,
+        "last_sync":        cfg.get("last_1c_sync"),
+        "onec_configured":  bool(url),
+        "onec_url":         url,
+        "onec_url_display": (url[:40] + "...") if len(url) > 40 else url,
+        "onec_user":        cfg.get("onec_user", ONEC_USER),
+        "sync_interval":    int(cfg.get("sync_interval", SYNC_INTERVAL)),
+        "is_running":       bool(running),
+        "logs":             logs,
     }
 
 # ══════════════════════════════════════════════════════════════════════

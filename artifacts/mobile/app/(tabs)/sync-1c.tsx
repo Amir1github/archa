@@ -24,6 +24,7 @@ interface SyncStatus {
   last_sync: string | null;
   onec_configured: boolean;
   onec_url: string;
+  onec_url_display: string;
   onec_user: string;
   sync_interval: number;
   is_running: boolean;
@@ -96,7 +97,7 @@ export default function Sync1cScreen() {
   });
 
   const openConfig = () => {
-    setCfgUrl(status?.onec_url?.replace("...", "") || "");
+    setCfgUrl(status?.onec_url || "");
     setCfgUser(status?.onec_user || "Администратор");
     setCfgPass("");
     setCfgInterval(String(status?.sync_interval || 600));
@@ -133,7 +134,7 @@ export default function Sync1cScreen() {
               </Text>
               {configured ? (
                 <Text style={[s.cardSub, { color: colors.mutedForeground }]} numberOfLines={1}>
-                  {status?.onec_url}
+                  {status?.onec_url_display || status?.onec_url}
                 </Text>
               ) : (
                 <Text style={[s.cardSub, { color: colors.mutedForeground }]}>

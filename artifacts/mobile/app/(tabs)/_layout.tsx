@@ -189,16 +189,16 @@ function ClassicTabLayout() {
         }}
       />
       <Tabs.Screen
-        name="employees"
-        options={{ href: null }}
-      />
-      <Tabs.Screen
         name="sync-1c"
         options={{
           title: "1С",
           href: isAdmin ? undefined : null,
           tabBarIcon: ({ color }) => <Feather name="refresh-cw" size={20} color={color} />,
         }}
+      />
+      <Tabs.Screen
+        name="employees"
+        options={{ href: null }}
       />
     </Tabs>
   );
