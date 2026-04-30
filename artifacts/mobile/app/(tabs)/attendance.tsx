@@ -1,21 +1,24 @@
-import React, { useState, useMemo } from "react";
+import React, { useState, useMemo, useCallback } from "react";
 import {
   View, Text, ScrollView, StyleSheet, TouchableOpacity,
-  ActivityIndicator, RefreshControl, Platform, Linking,
+  ActivityIndicator, RefreshControl, Platform, Linking, Alert, TextInput,
 } from "react-native";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Feather } from "@expo/vector-icons";
+import * as Location from "expo-location";
 
 import { useColors } from "@/hooks/useColors";
-import { apiGet } from "@/constants/api";
+import { apiGet, apiPost, apiPut, apiDelete } from "@/constants/api";
 import { StatusBadge } from "@/components/StatusBadge";
 import { EmptyState } from "@/components/EmptyState";
+import { useAuth } from "@/contexts/AuthContext";
+import { usePermissions } from "@/hooks/usePermissions";
 import type { Attendance, Employee } from "@/types";
 
 function getTodayISO() { return new Date().toISOString().split("T")[0]; }
 
-type Tab = "today" | "team" | "map" | "report";
+type Tab = "today" | "team" | "map" | "report" | "settings";
 
 interface AttendanceReport {
   emp_id: number;
@@ -35,8 +38,24 @@ interface Office {
 export default function AttendanceScreen() {
   const colors = useColors();
   const insets = useSafeAreaInsets();
+  const { user } = useAuth();
+  const { can } = usePermissions();
+  const qc = useQueryClient();
   const [activeTab, setActiveTab] = useState<Tab>("today");
   const [date, setDate] = useState(getTodayISO());
+
+  const [gpsLoading, setGpsLoading] = useState(false);
+  const [gpsResult, setGpsResult] = useState<{ action: "in"|"out"; distance_m: number; in_zone: boolean } | null>(null);
+  const [gpsError, setGpsError] = useState<string | null>(null);
+
+  const [newOfficeName, setNewOfficeName] = useState("");
+  const [newOfficeLat, setNewOfficeLat] = useState("");
+  const [newOfficeLng, setNewOfficeLng] = useState("");
+  const [newOfficeRadius, setNewOfficeRadius] = useState("200");
+  const [savingOffice, setSavingOffice] = useState(false);
+  const [workStart, setWorkStart] = useState("09:00");
+  const [workEnd, setWorkEnd] = useState("18:00");
+  const [savingSettings, setSavingSettings] = useState(false);
 
   const { data: attendance = [], isLoading: loadAtt, refetch } = useQuery<Attendance[]>({
     queryKey: ["attendance", date],
@@ -54,12 +73,100 @@ export default function AttendanceScreen() {
     enabled: activeTab === "report" || activeTab === "team",
     staleTime: 5 * 60 * 1000,
   });
-  const { data: offices = [], isLoading: loadOffices } = useQuery<Office[]>({
+  const { data: offices = [], isLoading: loadOffices, refetch: refetchOffices } = useQuery<Office[]>({
     queryKey: ["offices"],
     queryFn: () => apiGet("/api/offices"),
-    enabled: activeTab === "map",
+    enabled: activeTab === "map" || activeTab === "settings",
     staleTime: 15 * 60 * 1000,
   });
+
+  const myRecord = useMemo(() => {
+    if (!user) return null;
+    return attendance.find((a) => a.emp_id === user.id) || null;
+  }, [attendance, user]);
+
+  const handleCheckIn = useCallback(async () => {
+    if (!user) return;
+    setGpsLoading(true);
+    setGpsError(null);
+    try {
+      const { status } = await Location.requestForegroundPermissionsAsync();
+      if (status !== "granted") {
+        setGpsError("Разрешение на геолокацию не предоставлено");
+        return;
+      }
+      const loc = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
+      const res = await apiPost("/api/attendance/checkin", {
+        emp_id: user.id,
+        lat: loc.coords.latitude,
+        lng: loc.coords.longitude,
+      });
+      setGpsResult({ action: res.action, distance_m: res.distance_m, in_zone: res.in_zone });
+      await refetch();
+      qc.invalidateQueries({ queryKey: ["attendance-report"] });
+    } catch (e: any) {
+      setGpsError(e?.message || "Ошибка геолокации");
+    } finally {
+      setGpsLoading(false);
+    }
+  }, [user, refetch, qc]);
+
+  const handleAddOffice = useCallback(async () => {
+    if (!newOfficeName || !newOfficeLat || !newOfficeLng) {
+      Alert.alert("Ошибка", "Заполните название и координаты офиса");
+      return;
+    }
+    setSavingOffice(true);
+    try {
+      await apiPost("/api/offices", {
+        name: newOfficeName,
+        lat: parseFloat(newOfficeLat),
+        lng: parseFloat(newOfficeLng),
+        radius: parseInt(newOfficeRadius) || 200,
+      });
+      setNewOfficeName(""); setNewOfficeLat(""); setNewOfficeLng(""); setNewOfficeRadius("200");
+      refetchOffices();
+    } catch (e: any) {
+      Alert.alert("Ошибка", e?.message || "Не удалось добавить офис");
+    } finally {
+      setSavingOffice(false);
+    }
+  }, [newOfficeName, newOfficeLat, newOfficeLng, newOfficeRadius, refetchOffices]);
+
+  const handleDeleteOffice = useCallback(async (id: number, name: string) => {
+    Alert.alert("Удалить офис?", name, [
+      { text: "Отмена", style: "cancel" },
+      { text: "Удалить", style: "destructive", onPress: async () => {
+        try {
+          await apiDelete(`/api/offices/${id}`);
+          refetchOffices();
+        } catch {}
+      }},
+    ]);
+  }, [refetchOffices]);
+
+  const handleSaveSettings = useCallback(async () => {
+    setSavingSettings(true);
+    try {
+      await apiPut("/api/settings", { key: "work_start", value: workStart });
+      await apiPut("/api/settings", { key: "work_end", value: workEnd });
+      Alert.alert("Сохранено", "Настройки рабочего времени обновлены");
+    } catch (e: any) {
+      Alert.alert("Ошибка", e?.message || "Не удалось сохранить настройки");
+    } finally {
+      setSavingSettings(false);
+    }
+  }, [workStart, workEnd]);
+
+  const handleGetMyLocation = useCallback(async () => {
+    try {
+      const { status } = await Location.requestForegroundPermissionsAsync();
+      if (status !== "granted") return;
+      const loc = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
+      setNewOfficeLat(loc.coords.latitude.toFixed(6));
+      setNewOfficeLng(loc.coords.longitude.toFixed(6));
+    } catch {}
+  }, []);
 
   const empMap = useMemo(() => {
     const m: Record<number, Employee> = {};
@@ -92,7 +199,13 @@ export default function AttendanceScreen() {
     ["team", "Команда", "users"],
     ["map", "Карта", "map-pin"],
     ["report", "Отчёт", "file-text"],
+    ...(can("hr.manage") ? [["settings", "Настройки", "settings"] as [Tab, string, string]] : []),
   ];
+
+  const isCheckedIn = !!myRecord?.time_in;
+  const isCheckedOut = !!myRecord?.time_out;
+  const checkInLabel = !isCheckedIn ? "Отметить приход" : !isCheckedOut ? "Отметить уход" : "Уже отмечен";
+  const checkInDisabled = isCheckedOut || gpsLoading;
 
   return (
     <View style={[styles.container, { backgroundColor: colors.background }]}>
@@ -114,6 +227,46 @@ export default function AttendanceScreen() {
 
       {activeTab === "today" && (
         <>
+          {/* GPS Check-in Banner */}
+          <View style={[styles.checkinBanner, { backgroundColor: isCheckedIn ? (isCheckedOut ? colors.muted : colors.success + "15") : colors.primary + "10", borderBottomColor: colors.border }]}>
+            <View style={styles.checkinLeft}>
+              <View style={[styles.checkinIcon, { backgroundColor: isCheckedIn ? (isCheckedOut ? colors.muted : colors.success + "25") : colors.primary + "20" }]}>
+                <Feather name="map-pin" size={18} color={isCheckedIn ? (isCheckedOut ? colors.mutedForeground : colors.success) : colors.primary} />
+              </View>
+              <View>
+                {myRecord?.time_in ? (
+                  <>
+                    <Text style={[styles.checkinStatus, { color: colors.foreground }]}>
+                      Приход: {myRecord.time_in}{myRecord.time_out ? `  →  Уход: ${myRecord.time_out}` : ""}
+                    </Text>
+                    {gpsResult && (
+                      <Text style={[styles.checkinSub, { color: gpsResult.in_zone ? colors.success : colors.warning }]}>
+                        {gpsResult.in_zone ? "В зоне офиса" : `За зоной · ${gpsResult.distance_m} м`}
+                      </Text>
+                    )}
+                  </>
+                ) : (
+                  <Text style={[styles.checkinStatus, { color: colors.foreground }]}>GPS отметка прихода</Text>
+                )}
+                {gpsError && <Text style={[styles.checkinSub, { color: colors.danger }]}>{gpsError}</Text>}
+              </View>
+            </View>
+            <TouchableOpacity
+              onPress={handleCheckIn}
+              disabled={checkInDisabled}
+              style={[styles.checkinBtn, {
+                backgroundColor: checkInDisabled ? colors.muted : isCheckedIn ? colors.warning : colors.primary,
+                opacity: checkInDisabled ? 0.6 : 1,
+              }]}
+            >
+              {gpsLoading ? (
+                <ActivityIndicator size="small" color="#fff" />
+              ) : (
+                <Text style={styles.checkinBtnText}>{checkInLabel}</Text>
+              )}
+            </TouchableOpacity>
+          </View>
+
           <View style={[styles.statsRow, { backgroundColor: colors.card, borderBottomColor: colors.border }]}>
             <StatCard label="В офисе" value={todayStats.present} color={colors.success} />
             <View style={[styles.statDiv, { backgroundColor: colors.border }]} />
@@ -280,6 +433,130 @@ export default function AttendanceScreen() {
         </ScrollView>
       )}
 
+      {activeTab === "settings" && (
+        <ScrollView contentContainerStyle={[styles.list, { paddingBottom: 100 }]} showsVerticalScrollIndicator={false}>
+          {/* Work hours */}
+          <Text style={[styles.sectionTitle, { color: colors.mutedForeground, marginBottom: 8 }]}>Рабочее время</Text>
+          <View style={[styles.settingsCard, { backgroundColor: colors.card, borderRadius: colors.radius, shadowColor: colors.shadow }]}>
+            <View style={styles.settingsRow}>
+              <Text style={[styles.settingsLabel, { color: colors.foreground }]}>Начало работы</Text>
+              <TextInput
+                value={workStart}
+                onChangeText={setWorkStart}
+                style={[styles.settingsInput, { color: colors.foreground, backgroundColor: colors.muted, borderRadius: 8 }]}
+                placeholder="09:00"
+                placeholderTextColor={colors.mutedForeground}
+              />
+            </View>
+            <View style={[styles.settingsDivider, { backgroundColor: colors.border }]} />
+            <View style={styles.settingsRow}>
+              <Text style={[styles.settingsLabel, { color: colors.foreground }]}>Конец работы</Text>
+              <TextInput
+                value={workEnd}
+                onChangeText={setWorkEnd}
+                style={[styles.settingsInput, { color: colors.foreground, backgroundColor: colors.muted, borderRadius: 8 }]}
+                placeholder="18:00"
+                placeholderTextColor={colors.mutedForeground}
+              />
+            </View>
+            <TouchableOpacity
+              onPress={handleSaveSettings}
+              disabled={savingSettings}
+              style={[styles.saveBtn2, { backgroundColor: colors.primary, borderRadius: colors.radius / 2 }]}
+            >
+              {savingSettings ? <ActivityIndicator size="small" color="#fff" /> : <Text style={styles.saveBtnText}>Сохранить время</Text>}
+            </TouchableOpacity>
+          </View>
+
+          {/* Offices */}
+          <Text style={[styles.sectionTitle, { color: colors.mutedForeground, marginTop: 12, marginBottom: 8 }]}>Офисы и геозоны</Text>
+          {loadOffices ? <ActivityIndicator color={colors.primary} /> : offices.map((o) => (
+            <View key={o.id} style={[styles.officeItemCard, { backgroundColor: colors.card, borderRadius: colors.radius, shadowColor: colors.shadow }]}>
+              <View style={styles.officeItemLeft}>
+                <View style={[styles.officeIcon, { backgroundColor: colors.primary + "15" }]}>
+                  <Feather name="map-pin" size={16} color={colors.primary} />
+                </View>
+                <View>
+                  <Text style={[styles.officeName, { color: colors.foreground }]}>{o.name}</Text>
+                  <Text style={[styles.officeCoords, { color: colors.mutedForeground }]}>
+                    {o.lat.toFixed(4)}, {o.lng.toFixed(4)} · {o.radius}м
+                  </Text>
+                </View>
+              </View>
+              <TouchableOpacity onPress={() => handleDeleteOffice(o.id, o.name)} style={styles.delBtn}>
+                <Feather name="trash-2" size={16} color={colors.danger} />
+              </TouchableOpacity>
+            </View>
+          ))}
+
+          {/* Add office form */}
+          <View style={[styles.settingsCard, { backgroundColor: colors.card, borderRadius: colors.radius, shadowColor: colors.shadow, marginTop: 8 }]}>
+            <Text style={[styles.officeName, { color: colors.foreground, marginBottom: 10 }]}>Добавить офис</Text>
+            <TextInput
+              value={newOfficeName}
+              onChangeText={setNewOfficeName}
+              placeholder="Название офиса"
+              placeholderTextColor={colors.mutedForeground}
+              style={[styles.addInput, { color: colors.foreground, backgroundColor: colors.muted, borderRadius: 8 }]}
+            />
+            <View style={{ flexDirection: "row", gap: 8 }}>
+              <TextInput
+                value={newOfficeLat}
+                onChangeText={setNewOfficeLat}
+                placeholder="Широта"
+                placeholderTextColor={colors.mutedForeground}
+                keyboardType="numeric"
+                style={[styles.addInput, { flex: 1, color: colors.foreground, backgroundColor: colors.muted, borderRadius: 8 }]}
+              />
+              <TextInput
+                value={newOfficeLng}
+                onChangeText={setNewOfficeLng}
+                placeholder="Долгота"
+                placeholderTextColor={colors.mutedForeground}
+                keyboardType="numeric"
+                style={[styles.addInput, { flex: 1, color: colors.foreground, backgroundColor: colors.muted, borderRadius: 8 }]}
+              />
+            </View>
+            <View style={{ flexDirection: "row", gap: 8, alignItems: "center" }}>
+              <TextInput
+                value={newOfficeRadius}
+                onChangeText={setNewOfficeRadius}
+                placeholder="Радиус (м)"
+                placeholderTextColor={colors.mutedForeground}
+                keyboardType="numeric"
+                style={[styles.addInput, { flex: 1, color: colors.foreground, backgroundColor: colors.muted, borderRadius: 8 }]}
+              />
+              <TouchableOpacity
+                onPress={handleGetMyLocation}
+                style={[styles.gpsBtn, { backgroundColor: colors.primary + "15", borderRadius: 8 }]}
+              >
+                <Feather name="crosshair" size={16} color={colors.primary} />
+                <Text style={[styles.gpsBtnText, { color: colors.primary }]}>GPS</Text>
+              </TouchableOpacity>
+            </View>
+            <TouchableOpacity
+              onPress={handleAddOffice}
+              disabled={savingOffice}
+              style={[styles.saveBtn2, { backgroundColor: colors.success, borderRadius: colors.radius / 2 }]}
+            >
+              {savingOffice ? <ActivityIndicator size="small" color="#fff" /> : (
+                <><Feather name="plus" size={14} color="#fff" /><Text style={styles.saveBtnText}>Добавить офис</Text></>
+              )}
+            </TouchableOpacity>
+          </View>
+
+          {/* CSV Export */}
+          <Text style={[styles.sectionTitle, { color: colors.mutedForeground, marginTop: 12, marginBottom: 8 }]}>Экспорт данных</Text>
+          <TouchableOpacity
+            onPress={() => Linking.openURL("/api/export/csv?table=attendance")}
+            style={[styles.exportBtnFull, { backgroundColor: colors.success + "15", borderColor: colors.success + "50", borderRadius: colors.radius }]}
+          >
+            <Feather name="download" size={16} color={colors.success} />
+            <Text style={[styles.exportBtnText, { color: colors.success }]}>Скачать табель (CSV)</Text>
+          </TouchableOpacity>
+        </ScrollView>
+      )}
+
       {activeTab === "report" && (
         <ScrollView contentContainerStyle={styles.list} showsVerticalScrollIndicator={false}>
           <Text style={[styles.sectionTitle, { color: colors.mutedForeground, marginBottom: 4 }]}>Месячный отчёт HR</Text>
@@ -365,6 +642,30 @@ const styles = StyleSheet.create({
   tabRow: { flexDirection: "row" },
   tab: { flexDirection: "row", alignItems: "center", paddingHorizontal: 10, paddingVertical: 10, borderBottomWidth: 2, borderBottomColor: "transparent" },
   tabText: { fontSize: 12, fontFamily: "Inter_600SemiBold" },
+  // Check-in banner
+  checkinBanner: { flexDirection: "row", alignItems: "center", paddingHorizontal: 14, paddingVertical: 10, borderBottomWidth: 1, gap: 10 },
+  checkinLeft: { flex: 1, flexDirection: "row", alignItems: "center", gap: 10 },
+  checkinIcon: { width: 36, height: 36, borderRadius: 18, alignItems: "center", justifyContent: "center" },
+  checkinStatus: { fontSize: 13, fontFamily: "Inter_600SemiBold" },
+  checkinSub: { fontSize: 11, fontFamily: "Inter_400Regular", marginTop: 2 },
+  checkinBtn: { paddingHorizontal: 14, paddingVertical: 8, borderRadius: 20 },
+  checkinBtnText: { color: "#fff", fontSize: 12, fontFamily: "Inter_700Bold" },
+  // Settings tab
+  settingsCard: { padding: 14, gap: 10, shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.06, shadowRadius: 8, elevation: 2 },
+  settingsRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
+  settingsLabel: { fontSize: 14, fontFamily: "Inter_500Medium" },
+  settingsInput: { paddingHorizontal: 10, paddingVertical: 6, fontSize: 14, fontFamily: "Inter_500Medium", minWidth: 80, textAlign: "center" },
+  settingsDivider: { height: 1 },
+  saveBtn2: { flexDirection: "row", alignItems: "center", justifyContent: "center", paddingVertical: 10, gap: 6, marginTop: 4 },
+  saveBtnText: { color: "#fff", fontSize: 14, fontFamily: "Inter_700Bold" },
+  officeItemCard: { flexDirection: "row", alignItems: "center", padding: 12, gap: 10, marginBottom: 6, shadowOffset: { width: 0, height: 1 }, shadowOpacity: 0.04, shadowRadius: 4, elevation: 1 },
+  officeItemLeft: { flex: 1, flexDirection: "row", alignItems: "center", gap: 10 },
+  delBtn: { padding: 8 },
+  addInput: { paddingHorizontal: 10, paddingVertical: 8, fontSize: 13, fontFamily: "Inter_400Regular", marginBottom: 8 },
+  gpsBtn: { flexDirection: "row", alignItems: "center", gap: 4, paddingHorizontal: 10, paddingVertical: 8 },
+  gpsBtnText: { fontSize: 12, fontFamily: "Inter_600SemiBold" },
+  exportBtnFull: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8, paddingVertical: 14, borderWidth: 1 },
+  exportBtnText: { fontSize: 14, fontFamily: "Inter_600SemiBold" },
   statsRow: { flexDirection: "row", paddingHorizontal: 16, paddingVertical: 12, borderBottomWidth: 1 },
   statCard: { flex: 1, alignItems: "center" },
   statValue: { fontSize: 20, fontFamily: "Inter_700Bold" },

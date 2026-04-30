@@ -285,6 +285,27 @@ def init_db():
         created_at  TEXT    DEFAULT (datetime('now'))
     );
     CREATE INDEX IF NOT EXISTS idx_notif_emp  ON notifications(emp_id, read);
+
+    -- ── РКО (Расходный кассовый ордер) ──────────────────────────────
+    CREATE TABLE IF NOT EXISTS rko (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        number      TEXT    NOT NULL,
+        date        TEXT    NOT NULL,
+        recipient   TEXT    NOT NULL,
+        emp_id      INTEGER,
+        amount      REAL    DEFAULT 0,
+        currency    TEXT    DEFAULT 'TJS',
+        basis       TEXT    DEFAULT '',
+        category    TEXT    DEFAULT 'Прочее',
+        status      TEXT    DEFAULT 'draft',
+        created_by  INTEGER,
+        approved_by INTEGER,
+        note        TEXT    DEFAULT '',
+        created_at  TEXT    DEFAULT (datetime('now')),
+        updated_at  TEXT    DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_rko_date   ON rko(date);
+    CREATE INDEX IF NOT EXISTS idx_rko_status ON rko(status);
     """)
     db.commit()
     # ── Миграции (добавляем колонки если их нет) ───────────────────────
@@ -454,6 +475,36 @@ class AttendanceUpsert(BaseModel):
     auto_out: bool = False
     late_min: int = 0
     early_min: int = 0
+
+class AttendanceCheckIn(BaseModel):
+    emp_id: int
+    lat: float
+    lng: float
+
+class RkoCreate(BaseModel):
+    number: Optional[str] = None
+    date: str
+    recipient: str
+    emp_id: Optional[int] = None
+    amount: float = 0
+    currency: str = "TJS"
+    basis: str = ""
+    category: str = "Прочее"
+    status: str = "draft"
+    created_by: Optional[int] = None
+    note: str = ""
+
+class RkoUpdate(BaseModel):
+    date: Optional[str] = None
+    recipient: Optional[str] = None
+    emp_id: Optional[int] = None
+    amount: Optional[float] = None
+    currency: Optional[str] = None
+    basis: Optional[str] = None
+    category: Optional[str] = None
+    status: Optional[str] = None
+    approved_by: Optional[int] = None
+    note: Optional[str] = None
 
 class DebtorCommentCreate(BaseModel):
     emp_id: int
@@ -826,6 +877,140 @@ def attendance_report(
     rows = rows_to_list(db.execute(q, params).fetchall())
     db.close()
     return rows
+
+def haversine_m(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
+    """Расстояние в метрах между двумя GPS-точками."""
+    import math
+    R = 6_371_000
+    φ1, φ2 = math.radians(lat1), math.radians(lat2)
+    dφ = math.radians(lat2 - lat1)
+    dλ = math.radians(lng2 - lng1)
+    a = math.sin(dφ/2)**2 + math.cos(φ1)*math.cos(φ2)*math.sin(dλ/2)**2
+    return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
+
+@app.post("/api/attendance/checkin", tags=["hr"])
+async def attendance_checkin(body: AttendanceCheckIn):
+    """Умная отметка прихода/ухода по GPS."""
+    db = get_db()
+    today = date.today().isoformat()
+    now_time = datetime.now().strftime("%H:%M")
+
+    offices = rows_to_list(db.execute("SELECT * FROM offices WHERE active=1").fetchall())
+    nearest_dist = 999999
+    in_zone = False
+    for o in offices:
+        d = haversine_m(body.lat, body.lng, o["lat"], o["lng"])
+        if d < nearest_dist:
+            nearest_dist = d
+        if d <= o["radius"]:
+            in_zone = True
+
+    work_start_row = db.execute("SELECT value FROM settings WHERE key='work_start'").fetchone()
+    work_start = work_start_row[0] if work_start_row else "09:00"
+    work_end_row = db.execute("SELECT value FROM settings WHERE key='work_end'").fetchone()
+    work_end = work_end_row[0] if work_end_row else "18:00"
+
+    now_min = int(now_time.split(":")[0]) * 60 + int(now_time.split(":")[1])
+    ws_min  = int(work_start.split(":")[0]) * 60 + int(work_start.split(":")[1])
+    we_min  = int(work_end.split(":")[0]) * 60 + int(work_end.split(":")[1])
+
+    existing = row_to_dict(db.execute(
+        "SELECT * FROM attendance WHERE emp_id=? AND date=?", (body.emp_id, today)
+    ).fetchone())
+
+    if not existing or not existing.get("time_in"):
+        late_min = max(0, now_min - ws_min)
+        status = "late" if late_min > 0 else "present"
+        db.execute("""
+            INSERT INTO attendance(emp_id,date,time_in,lat,lng,status,late_min)
+            VALUES(?,?,?,?,?,?,?)
+            ON CONFLICT(emp_id,date) DO UPDATE SET
+                time_in=excluded.time_in, lat=excluded.lat, lng=excluded.lng,
+                status=excluded.status, late_min=excluded.late_min
+        """, (body.emp_id, today, now_time, body.lat, body.lng, status, late_min))
+        action = "in"
+    else:
+        early_min = max(0, we_min - now_min)
+        status2 = "early_out" if early_min > 0 else "present"
+        db.execute("""
+            UPDATE attendance SET time_out=?, out_lat=?, out_lng=?, early_min=?
+            WHERE emp_id=? AND date=?
+        """, (now_time, body.lat, body.lng, early_min, body.emp_id, today))
+        action = "out"
+
+    db.commit()
+    rec = row_to_dict(db.execute(
+        "SELECT * FROM attendance WHERE emp_id=? AND date=?", (body.emp_id, today)
+    ).fetchone())
+    db.close()
+    await ws_manager.broadcast("attendance_updated", rec)
+    return {"action": action, "record": rec, "distance_m": round(nearest_dist), "in_zone": in_zone}
+
+# ══════════════════════════════════════════════════════════════════════
+# РКО — Расходный кассовый ордер
+# ══════════════════════════════════════════════════════════════════════
+@app.get("/api/rko", tags=["rko"])
+def get_rko(
+    from_date: Optional[str] = Query(None),
+    to_date:   Optional[str] = Query(None),
+    status:    Optional[str] = Query(None),
+    category:  Optional[str] = Query(None),
+):
+    db = get_db()
+    q = "SELECT r.*, e.name as emp_name, e.color as emp_color FROM rko r LEFT JOIN employees e ON r.emp_id = e.id"
+    params, wheres = [], []
+    if from_date: wheres.append("r.date>=?");    params.append(from_date)
+    if to_date:   wheres.append("r.date<=?");    params.append(to_date)
+    if status:    wheres.append("r.status=?");   params.append(status)
+    if category:  wheres.append("r.category=?"); params.append(category)
+    if wheres: q += " WHERE " + " AND ".join(wheres)
+    q += " ORDER BY r.date DESC, r.id DESC"
+    rows = rows_to_list(db.execute(q, params).fetchall())
+    db.close()
+    return rows
+
+@app.post("/api/rko", status_code=201, tags=["rko"])
+async def create_rko(body: RkoCreate):
+    db = get_db()
+    if not body.number:
+        last = db.execute("SELECT MAX(id) FROM rko").fetchone()[0] or 0
+        body.number = f"РКО-{str(last + 1).zfill(4)}-{date.today().year}"
+    cur = db.execute("""
+        INSERT INTO rko(number,date,recipient,emp_id,amount,currency,basis,category,status,created_by,note)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?)
+    """, (body.number, body.date, body.recipient, body.emp_id, body.amount, body.currency,
+          body.basis, body.category, body.status, body.created_by, body.note))
+    db.commit()
+    rec = row_to_dict(db.execute("SELECT * FROM rko WHERE id=?", (cur.lastrowid,)).fetchone())
+    db.close()
+    return rec
+
+@app.put("/api/rko/{rko_id}", tags=["rko"])
+async def update_rko(rko_id: int, body: RkoUpdate):
+    db = get_db()
+    existing = row_to_dict(db.execute("SELECT * FROM rko WHERE id=?", (rko_id,)).fetchone())
+    if not existing:
+        raise HTTPException(404, "РКО не найден")
+    updates = {k: v for k, v in body.dict().items() if v is not None}
+    if not updates:
+        return existing
+    set_clause = ", ".join(f"{k}=?" for k in updates) + ", updated_at=datetime('now')"
+    db.execute(f"UPDATE rko SET {set_clause} WHERE id=?", (*updates.values(), rko_id))
+    db.commit()
+    rec = row_to_dict(db.execute("SELECT * FROM rko WHERE id=?", (rko_id,)).fetchone())
+    db.close()
+    return rec
+
+@app.delete("/api/rko/{rko_id}", tags=["rko"])
+async def delete_rko(rko_id: int):
+    db = get_db()
+    existing = row_to_dict(db.execute("SELECT * FROM rko WHERE id=?", (rko_id,)).fetchone())
+    if not existing:
+        raise HTTPException(404, "РКО не найден")
+    db.execute("DELETE FROM rko WHERE id=?", (rko_id,))
+    db.commit()
+    db.close()
+    return {"ok": True, "id": rko_id}
 
 @app.get("/api/offices", tags=["hr"])
 def get_offices():

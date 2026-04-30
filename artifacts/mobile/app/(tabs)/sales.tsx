@@ -1,7 +1,7 @@
-import React, { useState, useMemo } from "react";
+import React, { useState, useMemo, useRef, useCallback } from "react";
 import {
   View, Text, ScrollView, StyleSheet, TouchableOpacity,
-  ActivityIndicator, TextInput, Alert, Platform,
+  ActivityIndicator, TextInput, Alert, Platform, KeyboardAvoidingView,
 } from "react-native";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -9,7 +9,7 @@ import { Feather } from "@expo/vector-icons";
 
 import { useColors } from "@/hooks/useColors";
 import { usePermissions } from "@/hooks/usePermissions";
-import { apiGet, apiPut } from "@/constants/api";
+import { apiGet, apiPut, apiPost } from "@/constants/api";
 import type { Employee } from "@/types";
 
 interface SalesFact { manager_id: number; period: string; amount: number; updated_at: string; }
@@ -38,6 +38,11 @@ export default function SalesScreen() {
   const [selectedYear, setSelectedYear] = useState(2026);
   const [editingPlan, setEditingPlan] = useState<{ manager_id: number; period: string } | null>(null);
   const [editValue, setEditValue] = useState("");
+  const [fcTab, setFcTab] = useState<"main"|"history"|"factors"|"nom"|"ai">("main");
+  const [fcAiInput, setFcAiInput] = useState("");
+  const [fcAiLoading, setFcAiLoading] = useState(false);
+  const [fcAiMessages, setFcAiMessages] = useState<{role:"user"|"ai"; text:string}[]>([]);
+  const fcScrollRef = useRef<ScrollView>(null);
 
   const { data: facts = [], isLoading: loadFacts } = useQuery<SalesFact[]>({
     queryKey: ["sales-facts"],
@@ -142,6 +147,77 @@ export default function SalesScreen() {
 
   const PERIODS: PeriodType[] = ["month", "quarter", "year"];
   const PERIOD_LABELS: Record<PeriodType, string> = { month: "Месяц", quarter: "Квартал", year: "Год" };
+
+  const sendFcAI = useCallback(async (msg?: string) => {
+    const text = (msg ?? fcAiInput).trim();
+    if (!text) return;
+    setFcAiMessages((prev) => [...prev, { role: "user", text }]);
+    setFcAiInput("");
+    setFcAiLoading(true);
+    setTimeout(() => fcScrollRef.current?.scrollToEnd({ animated: true }), 100);
+    try {
+      const context = `Данные прогноза: базовый прогноз на год ${fmtM(forecastData.annualBase)}, тренд ${forecastData.trend > 0 ? "+" : ""}${forecastData.trend}%, достоверность ${forecastData.confidence}%, лет данных ${forecastData.histYears}. История продаж по годам: ${Object.keys(historyByYear).map((y) => `${y}: ${fmtM(Object.values(historyByYear[Number(y)]).flat().reduce((s, v) => s + v, 0))}`).join(", ")}. Компания: мебельный завод Пойтахт, Таджикистан, Душанбе.`;
+      const res = await apiPost<{ response: string }>("/api/ai/chat", { message: text, context });
+      setFcAiMessages((prev) => [...prev, { role: "ai", text: res.response }]);
+    } catch {
+      setFcAiMessages((prev) => [...prev, { role: "ai", text: "Ошибка: не удалось получить ответ от AI" }]);
+    } finally {
+      setFcAiLoading(false);
+      setTimeout(() => fcScrollRef.current?.scrollToEnd({ animated: true }), 100);
+    }
+  }, [fcAiInput, forecastData, historyByYear]);
+
+  const fcNomData = useMemo(() => {
+    const cats: Record<string, number> = {};
+    history.forEach((h) => {
+      if (h.category) cats[h.category] = (cats[h.category] || 0) + h.amount;
+    });
+    const maxYears = Object.keys(historyByYear).map(Number);
+    const latestYear = Math.max(...maxYears, 0);
+    const prevYear = latestYear - 1;
+    return Object.entries(cats)
+      .map(([cat, total]) => {
+        const latestAmt = history.filter((h) => h.year === latestYear && h.category === cat).reduce((s, h) => s + h.amount, 0);
+        const prevAmt = history.filter((h) => h.year === prevYear && h.category === cat).reduce((s, h) => s + h.amount, 0);
+        const growth = prevAmt > 0 ? Math.round(((latestAmt - prevAmt) / prevAmt) * 100) : 0;
+        const forecast = Math.round(latestAmt * (1 + forecastData.trend / 100));
+        return { cat, total, latestAmt, growth, forecast };
+      })
+      .sort((a, b) => b.total - a.total);
+  }, [history, historyByYear, forecastData]);
+
+  const seasonalityData = useMemo(() => {
+    const months = new Array(12).fill(0);
+    history.forEach((h) => {
+      if (h.month >= 1 && h.month <= 12) months[h.month - 1] += h.amount;
+    });
+    const total = months.reduce((s, v) => s + v, 1);
+    return MONTH_NAMES.map((name, i) => ({ name, amount: months[i], pct: Math.round((months[i] / total) * 100) }));
+  }, [history]);
+
+  const TAJIK_FACTORS = [
+    { group: "Макроэкономика · Таджикистан", items: [
+      { name: "Рост ВВП (прогноз МВФ)", value: "+5.5%", trend: "up" },
+      { name: "Инфляция (НБТ)", value: "5.8%", trend: "neutral" },
+      { name: "Курс USD/TJS", value: "10.93", trend: "neutral" },
+      { name: "Ставка НБТ", value: "10.5%", trend: "neutral" },
+    ]},
+    { group: "Строительство и жильё", items: [
+      { name: "Рост строительного сектора", value: "+8.2%", trend: "up" },
+      { name: "Новые жилые проекты", value: "+120 объектов", trend: "up" },
+      { name: "Ипотечная ставка", value: "14%", trend: "neutral" },
+    ]},
+    { group: "Сезонность", items: [
+      { name: "Пик продаж (апр–май)", value: "рост +12%", trend: "up" },
+      { name: "Спад (янв–фев)", value: "снижение -8%", trend: "down" },
+      { name: "Навруз (март)", value: "рост +15%", trend: "up" },
+    ]},
+    { group: "Рынок мебели", items: [
+      { name: "Рост рынка мебели в РТ", value: "+7.3%", trend: "up" },
+      { name: "Конкуренция (импорт)", value: "умеренная", trend: "neutral" },
+      { name: "Доля Пойтахт на рынке", value: "≈14%", trend: "up" },
+    ]},
+  ];
 
   const historyByYear = useMemo(() => {
     const years: Record<number, Record<string, number[]>> = {};
@@ -455,104 +531,227 @@ export default function SalesScreen() {
           )}
 
           {activeTab === "forecast" && (
-            <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
-              {loadHist ? <ActivityIndicator color={colors.primary} style={{ marginTop: 20 }} /> : (
-                <>
-                  {/* Forecast Hero */}
-                  <View style={[styles.fcHero, { backgroundColor: colors.primary, borderRadius: colors.radius }]}>
-                    <Text style={styles.fcHeroTitle}>Прогноз продаж</Text>
-                    <Text style={styles.fcHeroYear}>{new Date().getFullYear()}</Text>
-                    <Text style={styles.fcHeroAmt}>{fmtM(forecastData.annualBase)}</Text>
-                    <Text style={styles.fcHeroLabel}>базовый прогноз (год)</Text>
-                    <View style={styles.fcHeroRow}>
-                      <View style={styles.fcHeroStat}>
-                        <Text style={styles.fcHeroStatVal}>{forecastData.trend > 0 ? "+" : ""}{forecastData.trend}%</Text>
-                        <Text style={styles.fcHeroStatLabel}>тренд</Text>
-                      </View>
-                      <View style={[styles.fcHeroDiv, { backgroundColor: "rgba(255,255,255,0.3)" }]} />
-                      <View style={styles.fcHeroStat}>
-                        <Text style={styles.fcHeroStatVal}>{forecastData.confidence}%</Text>
-                        <Text style={styles.fcHeroStatLabel}>достоверность</Text>
-                      </View>
-                      <View style={[styles.fcHeroDiv, { backgroundColor: "rgba(255,255,255,0.3)" }]} />
-                      <View style={styles.fcHeroStat}>
-                        <Text style={styles.fcHeroStatVal}>{forecastData.histYears}</Text>
-                        <Text style={styles.fcHeroStatLabel}>лет данных</Text>
-                      </View>
-                    </View>
-                  </View>
+            <View style={{ flex: 1 }}>
+              {/* Forecast Sub-tabs */}
+              <ScrollView horizontal showsHorizontalScrollIndicator={false}
+                style={[styles.fcSubTabBar, { backgroundColor: colors.card, borderBottomColor: colors.border }]}
+                contentContainerStyle={{ flexDirection: "row" }}
+              >
+                {([["main","Прогноз","trending-up"],["history","История","clock"],["factors","Факторы","globe"],["nom","Товары","package"],["ai","AI Аналитик","cpu"]] as const).map(([key, label, icon]) => (
+                  <TouchableOpacity key={key} onPress={() => setFcTab(key)}
+                    style={[styles.fcSubTab, fcTab === key && { borderBottomColor: colors.primary, borderBottomWidth: 2 }]}
+                  >
+                    <Feather name={icon} size={11} color={fcTab === key ? colors.primary : colors.mutedForeground} style={{ marginRight: 3 }} />
+                    <Text style={[styles.fcSubTabText, { color: fcTab === key ? colors.primary : colors.mutedForeground }]}>{label}</Text>
+                  </TouchableOpacity>
+                ))}
+              </ScrollView>
 
-                  {/* Scenarios */}
-                  <View style={[styles.chartCard, { backgroundColor: colors.card, borderRadius: colors.radius, shadowColor: colors.shadow }]}>
-                    <Text style={[styles.chartTitle, { color: colors.foreground }]}>Сценарии на год</Text>
-                    {[
-                      { label: "Оптимистичный", val: forecastData.annualBase * 1.15, color: colors.success, icon: "trending-up" },
-                      { label: "Базовый", val: forecastData.annualBase, color: colors.primary, icon: "minus" },
-                      { label: "Пессимистичный", val: forecastData.annualBase * 0.85, color: colors.danger, icon: "trending-down" },
-                    ].map((sc) => (
-                      <View key={sc.label} style={[styles.scRow, { borderBottomColor: colors.border }]}>
-                        <View style={[styles.scIcon, { backgroundColor: sc.color + "15" }]}>
-                          <Feather name={sc.icon as any} size={14} color={sc.color} />
+              {/* ── MAIN FORECAST ── */}
+              {fcTab === "main" && (
+                <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
+                  {loadHist ? <ActivityIndicator color={colors.primary} style={{ marginTop: 20 }} /> : (
+                    <>
+                      <View style={[styles.fcHero, { backgroundColor: colors.primary, borderRadius: colors.radius }]}>
+                        <Text style={styles.fcHeroTitle}>Прогноз продаж</Text>
+                        <Text style={styles.fcHeroYear}>{new Date().getFullYear()}</Text>
+                        <Text style={styles.fcHeroAmt}>{fmtM(forecastData.annualBase)}</Text>
+                        <Text style={styles.fcHeroLabel}>базовый прогноз (год)</Text>
+                        <View style={styles.fcHeroRow}>
+                          <View style={styles.fcHeroStat}><Text style={styles.fcHeroStatVal}>{forecastData.trend > 0 ? "+" : ""}{forecastData.trend}%</Text><Text style={styles.fcHeroStatLabel}>тренд</Text></View>
+                          <View style={[styles.fcHeroDiv, { backgroundColor: "rgba(255,255,255,0.3)" }]} />
+                          <View style={styles.fcHeroStat}><Text style={styles.fcHeroStatVal}>{forecastData.confidence}%</Text><Text style={styles.fcHeroStatLabel}>достоверность</Text></View>
+                          <View style={[styles.fcHeroDiv, { backgroundColor: "rgba(255,255,255,0.3)" }]} />
+                          <View style={styles.fcHeroStat}><Text style={styles.fcHeroStatVal}>{forecastData.histYears}</Text><Text style={styles.fcHeroStatLabel}>лет данных</Text></View>
                         </View>
-                        <Text style={[styles.scLabel, { color: colors.foreground }]}>{sc.label}</Text>
-                        <Text style={[styles.scAmt, { color: sc.color }]}>{fmtM(Math.round(sc.val))}</Text>
                       </View>
-                    ))}
-                  </View>
-
-                  {/* Monthly forecast chart */}
-                  <View style={[styles.chartCard, { backgroundColor: colors.card, borderRadius: colors.radius, shadowColor: colors.shadow }]}>
-                    <Text style={[styles.chartTitle, { color: colors.foreground }]}>Прогноз по месяцам</Text>
-                    <View style={styles.legend}>
-                      <View style={styles.legendItem}><View style={[styles.legendDot, { backgroundColor: colors.primary }]} /><Text style={[styles.legendLabel, { color: colors.mutedForeground }]}>Прогноз</Text></View>
-                      <View style={styles.legendItem}><View style={[styles.legendDot, { backgroundColor: colors.success }]} /><Text style={[styles.legendLabel, { color: colors.mutedForeground }]}>Факт</Text></View>
-                    </View>
-                    <View style={styles.barChart}>
-                      {forecastData.monthlyBase.map((item) => {
-                        const maxVal = Math.max(...forecastData.monthlyBase.map((m) => Math.max(m.base, m.actual || 0)), 1);
-                        const baseH = (item.base / maxVal) * 120;
-                        const actualH = item.actual !== null ? (item.actual / maxVal) * 120 : 0;
-                        return (
-                          <View key={item.name} style={styles.barGroup}>
-                            <View style={styles.barPair}>
-                              <View style={[styles.bar, {
-                                height: baseH,
-                                backgroundColor: item.isFuture ? colors.primary + "40" : colors.primary + "20",
-                                borderTopWidth: 2,
-                                borderTopColor: colors.primary
-                              }]} />
-                              {item.actual !== null && (
-                                <View style={[styles.bar, { height: actualH, backgroundColor: item.actual >= item.base ? colors.success : colors.warning }]} />
-                              )}
-                            </View>
-                            <Text style={[styles.barLabel, { color: item.isFuture ? colors.primary : colors.mutedForeground }]}>{item.name}</Text>
+                      <View style={[styles.chartCard, { backgroundColor: colors.card, borderRadius: colors.radius, shadowColor: colors.shadow }]}>
+                        <Text style={[styles.chartTitle, { color: colors.foreground }]}>Сценарии на год</Text>
+                        {[
+                          { label: "Оптимистичный", val: forecastData.annualBase * 1.15, color: colors.success, icon: "trending-up" },
+                          { label: "Базовый", val: forecastData.annualBase, color: colors.primary, icon: "minus" },
+                          { label: "Пессимистичный", val: forecastData.annualBase * 0.85, color: colors.danger, icon: "trending-down" },
+                        ].map((sc) => (
+                          <View key={sc.label} style={[styles.scRow, { borderBottomColor: colors.border }]}>
+                            <View style={[styles.scIcon, { backgroundColor: sc.color + "15" }]}><Feather name={sc.icon as any} size={14} color={sc.color} /></View>
+                            <Text style={[styles.scLabel, { color: colors.foreground }]}>{sc.label}</Text>
+                            <Text style={[styles.scAmt, { color: sc.color }]}>{fmtM(Math.round(sc.val))}</Text>
                           </View>
-                        );
-                      })}
-                    </View>
-                  </View>
-
-                  {/* Key factors */}
-                  <View style={[styles.chartCard, { backgroundColor: colors.card, borderRadius: colors.radius, shadowColor: colors.shadow }]}>
-                    <Text style={[styles.chartTitle, { color: colors.foreground }]}>Ключевые факторы</Text>
-                    {[
-                      { factor: "Исторический тренд", impact: forecastData.trend > 0 ? "позитивный" : forecastData.trend < 0 ? "негативный" : "нейтральный", icon: "bar-chart-2", color: forecastData.trend >= 0 ? colors.success : colors.danger },
-                      { factor: "Сезонность (весна)", impact: "рост +8–12%", icon: "sun", color: colors.warning },
-                      { factor: "База лет данных", impact: `${forecastData.histYears} лет`, icon: "database", color: colors.primary },
-                      { factor: "Достоверность", impact: `${forecastData.confidence}%`, icon: "shield", color: forecastData.confidence >= 80 ? colors.success : colors.warning },
-                    ].map((f) => (
-                      <View key={f.factor} style={[styles.factorRow, { borderBottomColor: colors.border }]}>
-                        <View style={[styles.factorIcon, { backgroundColor: f.color + "15" }]}>
-                          <Feather name={f.icon as any} size={14} color={f.color} />
+                        ))}
+                      </View>
+                      <View style={[styles.chartCard, { backgroundColor: colors.card, borderRadius: colors.radius, shadowColor: colors.shadow }]}>
+                        <Text style={[styles.chartTitle, { color: colors.foreground }]}>Прогноз по месяцам</Text>
+                        <View style={styles.legend}>
+                          <View style={styles.legendItem}><View style={[styles.legendDot, { backgroundColor: colors.primary }]} /><Text style={[styles.legendLabel, { color: colors.mutedForeground }]}>Прогноз</Text></View>
+                          <View style={styles.legendItem}><View style={[styles.legendDot, { backgroundColor: colors.success }]} /><Text style={[styles.legendLabel, { color: colors.mutedForeground }]}>Факт</Text></View>
                         </View>
-                        <Text style={[styles.factorName, { color: colors.foreground }]}>{f.factor}</Text>
-                        <Text style={[styles.factorImpact, { color: f.color }]}>{f.impact}</Text>
+                        <View style={styles.barChart}>
+                          {forecastData.monthlyBase.map((item) => {
+                            const maxVal = Math.max(...forecastData.monthlyBase.map((m) => Math.max(m.base, m.actual || 0)), 1);
+                            return (
+                              <View key={item.name} style={styles.barGroup}>
+                                <View style={styles.barPair}>
+                                  <View style={[styles.bar, { height: (item.base / maxVal) * 120, backgroundColor: item.isFuture ? colors.primary + "40" : colors.primary + "20", borderTopWidth: 2, borderTopColor: colors.primary }]} />
+                                  {item.actual !== null && <View style={[styles.bar, { height: (item.actual / maxVal) * 120, backgroundColor: item.actual >= item.base ? colors.success : colors.warning }]} />}
+                                </View>
+                                <Text style={[styles.barLabel, { color: item.isFuture ? colors.primary : colors.mutedForeground }]}>{item.name}</Text>
+                              </View>
+                            );
+                          })}
+                        </View>
+                      </View>
+                    </>
+                  )}
+                </ScrollView>
+              )}
+
+              {/* ── HISTORY ── */}
+              {fcTab === "history" && (
+                <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
+                  {loadHist ? <ActivityIndicator color={colors.primary} style={{ marginTop: 20 }} /> : (
+                    <>
+                      <View style={[styles.chartCard, { backgroundColor: colors.card, borderRadius: colors.radius, shadowColor: colors.shadow }]}>
+                        <Text style={[styles.chartTitle, { color: colors.foreground }]}>Продажи по годам</Text>
+                        {Object.entries(historyByYear).sort((a, b) => Number(b[0]) - Number(a[0])).map(([year, cats]) => {
+                          const total = Object.values(cats).flat().reduce((s, v) => s + v, 0);
+                          return (
+                            <View key={year} style={[styles.histCard, { borderBottomColor: colors.border, borderBottomWidth: 1, paddingVertical: 10 }]}>
+                              <View style={{ flexDirection: "row", justifyContent: "space-between" }}>
+                                <Text style={[styles.histYear, { color: colors.foreground, fontSize: 15 }]}>{year}</Text>
+                                <Text style={[styles.histTotal, { color: colors.primary }]}>{fmtM(total)}</Text>
+                              </View>
+                            </View>
+                          );
+                        })}
+                        {Object.keys(historyByYear).length === 0 && <Text style={[styles.factorName, { color: colors.mutedForeground }]}>Нет исторических данных</Text>}
+                      </View>
+                      <View style={[styles.chartCard, { backgroundColor: colors.card, borderRadius: colors.radius, shadowColor: colors.shadow }]}>
+                        <Text style={[styles.chartTitle, { color: colors.foreground }]}>Сезонность по месяцам</Text>
+                        <View style={{ flexDirection: "row", alignItems: "flex-end", height: 100, gap: 3 }}>
+                          {seasonalityData.map((m) => {
+                            const maxPct = Math.max(...seasonalityData.map((s) => s.pct), 1);
+                            return (
+                              <View key={m.name} style={{ flex: 1, alignItems: "center", gap: 2 }}>
+                                <View style={[{ width: "90%", borderRadius: 3, backgroundColor: colors.primary, opacity: 0.6 + (m.pct / maxPct) * 0.4, height: (m.pct / maxPct) * 80, minHeight: 4 }]} />
+                                <Text style={{ fontSize: 8, color: colors.mutedForeground }}>{m.name}</Text>
+                              </View>
+                            );
+                          })}
+                        </View>
+                        <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6, marginTop: 8 }}>
+                          {seasonalityData.map((m) => (
+                            <Text key={m.name} style={{ fontSize: 11, color: colors.mutedForeground }}>{m.name}: {m.pct}%</Text>
+                          ))}
+                        </View>
+                      </View>
+                    </>
+                  )}
+                </ScrollView>
+              )}
+
+              {/* ── FACTORS ── */}
+              {fcTab === "factors" && (
+                <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
+                  {TAJIK_FACTORS.map((group) => (
+                    <View key={group.group} style={[styles.chartCard, { backgroundColor: colors.card, borderRadius: colors.radius, shadowColor: colors.shadow }]}>
+                      <Text style={[styles.chartTitle, { color: colors.foreground }]}>{group.group}</Text>
+                      {group.items.map((item) => (
+                        <View key={item.name} style={[styles.factorRow, { borderBottomColor: colors.border }]}>
+                          <View style={[styles.factorIcon, { backgroundColor: (item.trend === "up" ? colors.success : item.trend === "down" ? colors.danger : colors.muted) + "30" }]}>
+                            <Feather name={item.trend === "up" ? "trending-up" : item.trend === "down" ? "trending-down" : "minus"} size={13} color={item.trend === "up" ? colors.success : item.trend === "down" ? colors.danger : colors.mutedForeground} />
+                          </View>
+                          <Text style={[styles.factorName, { color: colors.foreground }]}>{item.name}</Text>
+                          <Text style={[styles.factorImpact, { color: item.trend === "up" ? colors.success : item.trend === "down" ? colors.danger : colors.mutedForeground }]}>{item.value}</Text>
+                        </View>
+                      ))}
+                    </View>
+                  ))}
+                </ScrollView>
+              )}
+
+              {/* ── NOMENCLATURE ── */}
+              {fcTab === "nom" && (
+                <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
+                  {loadHist ? <ActivityIndicator color={colors.primary} style={{ marginTop: 20 }} /> : fcNomData.length === 0 ? (
+                    <View style={[styles.chartCard, { backgroundColor: colors.card, borderRadius: colors.radius }]}>
+                      <Text style={[styles.factorName, { color: colors.mutedForeground }]}>Нет данных по товарным группам. Загрузите историю из 1С.</Text>
+                    </View>
+                  ) : (
+                    <>
+                      <View style={[styles.chartCard, { backgroundColor: colors.card, borderRadius: colors.radius, shadowColor: colors.shadow }]}>
+                        <Text style={[styles.chartTitle, { color: colors.foreground }]}>Прогноз по группам товаров</Text>
+                        {fcNomData.map((d) => (
+                          <View key={d.cat} style={[styles.factorRow, { borderBottomColor: colors.border }]}>
+                            <View style={[styles.factorIcon, { backgroundColor: colors.primary + "15" }]}><Feather name="package" size={13} color={colors.primary} /></View>
+                            <Text style={[styles.factorName, { color: colors.foreground }]}>{d.cat}</Text>
+                            <View style={{ alignItems: "flex-end" }}>
+                              <Text style={[styles.factorImpact, { color: colors.primary }]}>{fmtM(d.forecast)}</Text>
+                              <Text style={{ fontSize: 10, color: d.growth >= 0 ? colors.success : colors.danger, fontFamily: "Inter_500Medium" }}>{d.growth >= 0 ? "+" : ""}{d.growth}%</Text>
+                            </View>
+                          </View>
+                        ))}
+                      </View>
+                      <View style={[styles.chartCard, { backgroundColor: colors.card, borderRadius: colors.radius, shadowColor: colors.shadow }]}>
+                        <Text style={[styles.chartTitle, { color: colors.foreground }]}>Топ-5 роста</Text>
+                        {[...fcNomData].sort((a, b) => b.growth - a.growth).slice(0, 5).map((d) => (
+                          <View key={d.cat} style={[styles.scRow, { borderBottomColor: colors.border }]}>
+                            <View style={[styles.scIcon, { backgroundColor: colors.success + "15" }]}><Feather name="trending-up" size={13} color={colors.success} /></View>
+                            <Text style={[styles.scLabel, { color: colors.foreground }]}>{d.cat}</Text>
+                            <Text style={[styles.scAmt, { color: colors.success }]}>+{d.growth}%</Text>
+                          </View>
+                        ))}
+                      </View>
+                    </>
+                  )}
+                </ScrollView>
+              )}
+
+              {/* ── AI ANALYST ── */}
+              {fcTab === "ai" && (
+                <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === "ios" ? "padding" : undefined}>
+                  <ScrollView
+                    ref={fcScrollRef}
+                    contentContainerStyle={[styles.content, { flexGrow: 1, paddingBottom: 20 }]}
+                    showsVerticalScrollIndicator={false}
+                    onContentSizeChange={() => fcScrollRef.current?.scrollToEnd({ animated: true })}
+                  >
+                    {fcAiMessages.length === 0 && (
+                      <>
+                        <Text style={[styles.chartTitle, { color: colors.mutedForeground, textAlign: "center", marginTop: 20 }]}>AI Аналитик прогноза</Text>
+                        <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8, marginTop: 12 }}>
+                          {["Почему такой прогноз?","Как улучшить продажи?","Сезонные риски?","Лучший квартал?"].map((q) => (
+                            <TouchableOpacity key={q} onPress={() => sendFcAI(q)}
+                              style={[styles.scRow, { backgroundColor: colors.muted, borderRadius: colors.radius, paddingHorizontal: 12, paddingVertical: 8, borderBottomWidth: 0, flex: 0 }]}>
+                              <Text style={{ color: colors.primary, fontSize: 12, fontFamily: "Inter_500Medium" }}>{q}</Text>
+                            </TouchableOpacity>
+                          ))}
+                        </View>
+                      </>
+                    )}
+                    {fcAiMessages.map((m, i) => (
+                      <View key={i} style={[styles.aiMsg, { alignSelf: m.role === "user" ? "flex-end" : "flex-start", backgroundColor: m.role === "user" ? colors.primary : colors.card, borderRadius: colors.radius }]}>
+                        <Text style={{ color: m.role === "user" ? "#fff" : colors.foreground, fontSize: 13, fontFamily: "Inter_400Regular" }}>{m.text}</Text>
                       </View>
                     ))}
+                    {fcAiLoading && <ActivityIndicator color={colors.primary} style={{ marginTop: 8 }} />}
+                  </ScrollView>
+                  <View style={[styles.aiInputWrap, { backgroundColor: colors.card, borderTopColor: colors.border }]}>
+                    <TextInput
+                      value={fcAiInput}
+                      onChangeText={setFcAiInput}
+                      placeholder="Спросите о прогнозе..."
+                      placeholderTextColor={colors.mutedForeground}
+                      style={[styles.aiInput, { color: colors.foreground, backgroundColor: colors.muted, borderRadius: 20 }]}
+                      onSubmitEditing={() => sendFcAI()}
+                      returnKeyType="send"
+                    />
+                    <TouchableOpacity onPress={() => sendFcAI()} style={[styles.aiSendBtn, { backgroundColor: colors.primary }]}>
+                      <Feather name="send" size={16} color="#fff" />
+                    </TouchableOpacity>
                   </View>
-                </>
+                </KeyboardAvoidingView>
               )}
-            </ScrollView>
+            </View>
           )}
         </>
       )}
@@ -637,6 +836,13 @@ const styles = StyleSheet.create({
   fcHeroStatVal: { color: "#fff", fontSize: 18, fontFamily: "Inter_700Bold" },
   fcHeroStatLabel: { color: "rgba(255,255,255,0.75)", fontSize: 10, fontFamily: "Inter_400Regular" },
   fcHeroDiv: { width: 1, height: 24 },
+  fcSubTabBar: { borderBottomWidth: 1, maxHeight: 40, flexShrink: 0 },
+  fcSubTab: { flexDirection: "row", alignItems: "center", paddingHorizontal: 12, paddingVertical: 10, borderBottomWidth: 2, borderBottomColor: "transparent" },
+  fcSubTabText: { fontSize: 11, fontFamily: "Inter_600SemiBold" },
+  aiMsg: { maxWidth: "82%", padding: 12, marginVertical: 4 },
+  aiInputWrap: { flexDirection: "row", alignItems: "center", padding: 10, borderTopWidth: 1, gap: 8 },
+  aiInput: { flex: 1, paddingHorizontal: 14, paddingVertical: 10, fontSize: 14, fontFamily: "Inter_400Regular" },
+  aiSendBtn: { width: 40, height: 40, borderRadius: 20, alignItems: "center", justifyContent: "center" },
   scRow: { flexDirection: "row", alignItems: "center", gap: 10, paddingVertical: 10, borderBottomWidth: 1 },
   scIcon: { width: 30, height: 30, borderRadius: 8, alignItems: "center", justifyContent: "center" },
   scLabel: { flex: 1, fontSize: 14, fontFamily: "Inter_500Medium" },

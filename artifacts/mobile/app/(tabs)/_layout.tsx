@@ -16,6 +16,8 @@ import { useAuth } from "@/contexts/AuthContext";
 import { useColors } from "@/hooks/useColors";
 
 function NativeTabLayout() {
+  const { user } = useAuth();
+  const isRkoUser = user ? (user.role?.toLowerCase().includes("директор") || user.role?.toLowerCase().includes("главный бухгалт")) : false;
   return (
     <NativeTabs>
       <NativeTabs.Trigger name="index">
@@ -50,6 +52,12 @@ function NativeTabLayout() {
         <Icon sf={{ default: "cpu", selected: "cpu.fill" }} />
         <Label>AI Агент</Label>
       </NativeTabs.Trigger>
+      {isRkoUser && (
+        <NativeTabs.Trigger name="rko">
+          <Icon sf={{ default: "doc.text", selected: "doc.text.fill" }} />
+          <Label>РКО</Label>
+        </NativeTabs.Trigger>
+      )}
       <NativeTabs.Trigger name="profile">
         <Icon sf={{ default: "person.circle", selected: "person.circle.fill" }} />
         <Label>Профиль</Label>
@@ -64,6 +72,8 @@ function ClassicTabLayout() {
   const isDark = colorScheme === "dark";
   const isIOS = Platform.OS === "ios";
   const isWeb = Platform.OS === "web";
+  const { user } = useAuth();
+  const isRkoUser = user ? (user.role?.toLowerCase().includes("директор") || user.role?.toLowerCase().includes("главный бухгалт")) : false;
 
   return (
     <Tabs
@@ -160,6 +170,14 @@ function ClassicTabLayout() {
         options={{
           title: "Профиль",
           tabBarIcon: ({ color }) => <Feather name="user" size={20} color={color} />,
+        }}
+      />
+      <Tabs.Screen
+        name="rko"
+        options={{
+          title: "РКО",
+          href: isRkoUser ? undefined : null,
+          tabBarIcon: ({ color }) => <Feather name="file-text" size={20} color={color} />,
         }}
       />
       <Tabs.Screen
