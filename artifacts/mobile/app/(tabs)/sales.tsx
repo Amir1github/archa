@@ -1,7 +1,7 @@
 import React, { useState, useMemo, useRef, useCallback } from "react";
 import {
   View, Text, ScrollView, StyleSheet, TouchableOpacity,
-  ActivityIndicator, TextInput, Alert, Platform, KeyboardAvoidingView,
+  ActivityIndicator, TextInput, Alert, Platform, KeyboardAvoidingView, Modal, Linking,
 } from "react-native";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -9,15 +9,41 @@ import { Feather } from "@expo/vector-icons";
 
 import { useColors } from "@/hooks/useColors";
 import { usePermissions } from "@/hooks/usePermissions";
-import { apiGet, apiPut, apiPost } from "@/constants/api";
+import { useAuth } from "@/contexts/AuthContext";
+import { apiGet, apiPut, apiPost, apiDelete } from "@/constants/api";
 import type { Employee } from "@/types";
 
 interface SalesFact { manager_id: number; period: string; amount: number; updated_at: string; }
 interface SalesPlan { manager_id: number; period: string; amount: number; updated_at: string; }
 interface SalesHistory { year: number; month: number; category: string; amount: number; }
 
+interface Client {
+  id: number; name: string; phone: string; address: string; contact: string;
+  category: string; status: string; manager_id: number | null; manager_name: string | null;
+  note: string; order_count: number; last_order: string | null; created_at: string;
+}
+interface RouteStop {
+  id: number; route_id: number; client_id: number | null; client_name: string;
+  address: string; order_num: number; status: string; note: string; visit_time: string;
+}
+interface Route {
+  id: number; date: string; manager_id: number | null; manager_name: string | null;
+  name: string; status: string; stops: RouteStop[];
+}
+interface OrderItem {
+  id: number; order_id: number; product_name: string; category: string;
+  qty: number; price: number; total: number;
+}
+interface Order {
+  id: number; number: string; client_id: number | null; client_name: string;
+  manager_id: number | null; manager_name: string | null; total: number;
+  status: string; note: string; items: OrderItem[]; created_at: string;
+}
+interface WarehouseItem { id: number; name: string; qty: number; category: string; price?: number; }
+interface CartItem { product_name: string; category: string; qty: number; price: number; }
+
 type PeriodType = "month" | "quarter" | "year";
-type TabKey = "analytics" | "plan" | "history" | "forecast";
+type TabKey = "analytics" | "plan" | "history" | "forecast" | "route" | "clients" | "orders";
 
 const MONTH_NAMES = ["Янв", "Фев", "Мар", "Апр", "Май", "Июн", "Июл", "Авг", "Сен", "Окт", "Ноя", "Дек"];
 const QUARTER_LABELS = ["Q1 (Янв-Мар)", "Q2 (Апр-Июн)", "Q3 (Июл-Сен)", "Q4 (Окт-Дек)"];
@@ -32,6 +58,7 @@ export default function SalesScreen() {
   const insets = useSafeAreaInsets();
   const queryClient = useQueryClient();
   const { can } = usePermissions();
+  const { user } = useAuth();
 
   const [activeTab, setActiveTab] = useState<TabKey>("analytics");
   const [periodType, setPeriodType] = useState<PeriodType>("month");
@@ -43,6 +70,28 @@ export default function SalesScreen() {
   const [fcAiLoading, setFcAiLoading] = useState(false);
   const [fcAiMessages, setFcAiMessages] = useState<{role:"user"|"ai"; text:string}[]>([]);
   const fcScrollRef = useRef<ScrollView>(null);
+
+  // ── Маршрут state ──
+  const [routeDate, setRouteDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const [routeMgrFilter, setRouteMgrFilter] = useState<number | null>(null);
+  const [showCreateRoute, setShowCreateRoute] = useState(false);
+  const [newRouteName, setNewRouteName] = useState("");
+  const [newRouteStops, setNewRouteStops] = useState<{client_name:string;address:string}[]>([{client_name:"",address:""}]);
+
+  // ── Клиенты state ──
+  const [clientSearch, setClientSearch] = useState("");
+  const [clientCat, setClientCat] = useState("Все");
+  const [selectedClient, setSelectedClient] = useState<Client | null>(null);
+  const [showCreateClient, setShowCreateClient] = useState(false);
+  const [newClient, setNewClient] = useState({ name:"", phone:"", address:"", contact:"", category:"Розница", note:"" });
+
+  // ── Заказы state ──
+  const [orderStatus, setOrderStatus] = useState("Все");
+  const [showCreateOrder, setShowCreateOrder] = useState(false);
+  const [orderClient, setOrderClient] = useState<{id:number|null;name:string}>({id:null,name:""});
+  const [orderNote, setOrderNote] = useState("");
+  const [cart, setCart] = useState<CartItem[]>([]);
+  const [expandedOrder, setExpandedOrder] = useState<number | null>(null);
 
   const { data: facts = [], isLoading: loadFacts } = useQuery<SalesFact[]>({
     queryKey: ["sales-facts"],
@@ -63,6 +112,80 @@ export default function SalesScreen() {
   const { data: employees = [] } = useQuery<Employee[]>({
     queryKey: ["employees"],
     queryFn: () => apiGet("/api/employees"),
+  });
+
+  // ── New queries ──
+  const { data: clients = [], isLoading: loadClients, refetch: refetchClients } = useQuery<Client[]>({
+    queryKey: ["clients", clientSearch, clientCat],
+    queryFn: () => {
+      const params = new URLSearchParams();
+      if (clientSearch) params.set("search", clientSearch);
+      if (clientCat !== "Все") params.set("category", clientCat);
+      return apiGet(`/api/clients?${params}`);
+    },
+    enabled: activeTab === "clients",
+    staleTime: 30_000,
+  });
+
+  const { data: routes = [], isLoading: loadRoutes, refetch: refetchRoutes } = useQuery<Route[]>({
+    queryKey: ["routes", routeDate, routeMgrFilter],
+    queryFn: () => {
+      const params = new URLSearchParams({ route_date: routeDate });
+      if (routeMgrFilter) params.set("manager_id", String(routeMgrFilter));
+      return apiGet(`/api/routes?${params}`);
+    },
+    enabled: activeTab === "route",
+    staleTime: 30_000,
+  });
+
+  const { data: orders = [], isLoading: loadOrders, refetch: refetchOrders } = useQuery<Order[]>({
+    queryKey: ["orders", orderStatus],
+    queryFn: () => {
+      const params = new URLSearchParams();
+      if (orderStatus !== "Все") params.set("status", orderStatus);
+      return apiGet(`/api/orders?${params}`);
+    },
+    enabled: activeTab === "orders",
+    staleTime: 30_000,
+  });
+
+  const { data: warehouse = [] } = useQuery<WarehouseItem[]>({
+    queryKey: ["warehouse"],
+    queryFn: () => apiGet("/api/warehouse"),
+    staleTime: 5 * 60_000,
+  });
+
+  // ── New mutations ──
+  const createRoute = useMutation({
+    mutationFn: (data: object) => apiPost("/api/routes", data),
+    onSuccess: () => { queryClient.invalidateQueries({ queryKey: ["routes"] }); setShowCreateRoute(false); setNewRouteName(""); setNewRouteStops([{client_name:"",address:""}]); },
+  });
+
+  const visitStop = useMutation({
+    mutationFn: ({ stopId, status }: { stopId: number; status: string }) =>
+      apiPut(`/api/routes/stops/${stopId}/visit`, { status }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["routes"] }),
+  });
+
+  const createClient = useMutation({
+    mutationFn: (data: object) => apiPost("/api/clients", data),
+    onSuccess: () => { queryClient.invalidateQueries({ queryKey: ["clients"] }); setShowCreateClient(false); setNewClient({ name:"", phone:"", address:"", contact:"", category:"Розница", note:"" }); },
+  });
+
+  const createOrder = useMutation({
+    mutationFn: (data: object) => apiPost("/api/orders", data),
+    onSuccess: () => { queryClient.invalidateQueries({ queryKey: ["orders"] }); setShowCreateOrder(false); setCart([]); setOrderClient({id:null,name:""}); setOrderNote(""); },
+  });
+
+  const updateOrderStatus = useMutation({
+    mutationFn: ({ orderId, status }: { orderId: number; status: string }) =>
+      apiPut(`/api/orders/${orderId}/status`, { status }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["orders"] }),
+  });
+
+  const deleteRoute = useMutation({
+    mutationFn: (routeId: number) => apiDelete(`/api/routes/${routeId}`),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["routes"] }),
   });
 
   const updatePlan = useMutation({
@@ -278,7 +401,15 @@ export default function SalesScreen() {
       <View style={[styles.header, { paddingTop: topPad + 12, backgroundColor: colors.card, borderBottomColor: colors.border }]}>
         <Text style={[styles.title, { color: colors.foreground }]}>Продажи</Text>
         <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.tabRow} contentContainerStyle={{ flexDirection: "row" }}>
-          {([["analytics", "Аналитика", "bar-chart-2"], ["plan", "Планы", "target"], ["history", "История", "clock"], ["forecast", "Прогноз", "trending-up"]] as [TabKey, string, string][]).map(([key, label, icon]) => (
+          {([
+            ["analytics", "Аналитика", "bar-chart-2"],
+            ["plan", "Планы", "target"],
+            ["history", "История", "clock"],
+            ["forecast", "Прогноз", "trending-up"],
+            ["route", "Маршрут", "map"],
+            ["clients", "Клиенты", "users"],
+            ["orders", "Заказы", "shopping-cart"],
+          ] as [TabKey, string, string][]).map(([key, label, icon]) => (
             <TouchableOpacity
               key={key}
               onPress={() => setActiveTab(key)}
@@ -763,11 +894,441 @@ export default function SalesScreen() {
               )}
             </View>
           )}
+
+          {/* ════════════════════ МАРШРУТ TAB ════════════════════ */}
+          {activeTab === "route" && (
+            <View style={{ flex: 1 }}>
+              {/* Date + filter row */}
+              <View style={[styles.filterRow, { backgroundColor: colors.card, borderBottomColor: colors.border }]}>
+                <TouchableOpacity onPress={() => { const d = new Date(routeDate); d.setDate(d.getDate()-1); setRouteDate(d.toISOString().slice(0,10)); }} style={styles.dateArrow}>
+                  <Feather name="chevron-left" size={20} color={colors.primary} />
+                </TouchableOpacity>
+                <Text style={[styles.dateText, { color: colors.foreground }]}>{routeDate === new Date().toISOString().slice(0,10) ? "Сегодня" : routeDate}</Text>
+                <TouchableOpacity onPress={() => { const d = new Date(routeDate); d.setDate(d.getDate()+1); setRouteDate(d.toISOString().slice(0,10)); }} style={styles.dateArrow}>
+                  <Feather name="chevron-right" size={20} color={colors.primary} />
+                </TouchableOpacity>
+                <TouchableOpacity onPress={() => setRouteDate(new Date().toISOString().slice(0,10))} style={[styles.todayBtn, { backgroundColor: colors.primary + "20", borderRadius: 8 }]}>
+                  <Text style={{ color: colors.primary, fontSize: 11, fontFamily: "Inter_600SemiBold" }}>Сег.</Text>
+                </TouchableOpacity>
+                <View style={{ flex: 1 }} />
+                <TouchableOpacity onPress={() => setShowCreateRoute(true)} style={[styles.addBtn, { backgroundColor: colors.primary }]}>
+                  <Feather name="plus" size={14} color="#fff" />
+                  <Text style={styles.addBtnText}>Маршрут</Text>
+                </TouchableOpacity>
+              </View>
+
+              <ScrollView contentContainerStyle={[styles.content, { paddingBottom: 100 }]} showsVerticalScrollIndicator={false}>
+                {loadRoutes ? <ActivityIndicator color={colors.primary} style={{ marginTop: 24 }} /> :
+                  routes.length === 0 ? (
+                    <View style={{ alignItems: "center", paddingTop: 40, gap: 8 }}>
+                      <Feather name="map" size={40} color={colors.mutedForeground} />
+                      <Text style={{ color: colors.mutedForeground, fontSize: 14 }}>Маршрутов на {routeDate} нет</Text>
+                      <TouchableOpacity onPress={() => setShowCreateRoute(true)} style={[styles.addBtn, { backgroundColor: colors.primary, alignSelf: "center" }]}>
+                        <Feather name="plus" size={14} color="#fff" />
+                        <Text style={styles.addBtnText}>Создать маршрут</Text>
+                      </TouchableOpacity>
+                    </View>
+                  ) : routes.map((route) => {
+                    const done = route.stops.filter(s => s.status === "visited").length;
+                    return (
+                      <View key={route.id} style={[styles.routeCard, { backgroundColor: colors.card, borderRadius: colors.radius, shadowColor: colors.shadow }]}>
+                        <View style={styles.routeHeader}>
+                          <View style={{ flex: 1 }}>
+                            <Text style={[styles.routeTitle, { color: colors.foreground }]}>{route.name || `Маршрут #${route.id}`}</Text>
+                            <Text style={[styles.routeSub, { color: colors.mutedForeground }]}>{route.manager_name || "—"} · {done}/{route.stops.length} точек</Text>
+                          </View>
+                          <View style={[styles.tag, { backgroundColor: done === route.stops.length && route.stops.length > 0 ? colors.success+"20" : colors.primary+"15" }]}>
+                            <Text style={[styles.tagText, { color: done === route.stops.length && route.stops.length > 0 ? colors.success : colors.primary }]}>
+                              {done === route.stops.length && route.stops.length > 0 ? "Завершён" : `${done}/${route.stops.length}`}
+                            </Text>
+                          </View>
+                          {can("sales.manage") && (
+                            <TouchableOpacity onPress={() => Alert.alert("Удалить маршрут?","",[ {text:"Отмена"},{text:"Удалить",style:"destructive",onPress:()=>deleteRoute.mutate(route.id)} ])} style={{ marginLeft: 6 }}>
+                              <Feather name="trash-2" size={15} color={colors.mutedForeground} />
+                            </TouchableOpacity>
+                          )}
+                        </View>
+                        {route.stops.map((stop) => (
+                          <View key={stop.id} style={[styles.stopRow, { borderTopColor: colors.border }]}>
+                            <View style={[styles.stopDot, { backgroundColor: stop.status === "visited" ? colors.success : stop.status === "skipped" ? colors.danger : colors.muted }]} />
+                            <View style={{ flex: 1 }}>
+                              <Text style={[styles.stopName, { color: colors.foreground }]}>{stop.client_name || "Клиент"}</Text>
+                              {!!stop.address && <Text style={[styles.stopAddr, { color: colors.mutedForeground }]}>{stop.address}</Text>}
+                              {!!stop.visit_time && <Text style={{ fontSize: 10, color: colors.mutedForeground, fontFamily: "Inter_400Regular" }}>Визит: {stop.visit_time}</Text>}
+                            </View>
+                            {stop.status === "pending" && (
+                              <View style={{ flexDirection: "row", gap: 6 }}>
+                                <TouchableOpacity onPress={() => visitStop.mutate({ stopId: stop.id, status: "visited" })} style={[styles.visitBtn, { backgroundColor: colors.success+"20" }]}>
+                                  <Feather name="check" size={13} color={colors.success} />
+                                </TouchableOpacity>
+                                <TouchableOpacity onPress={() => visitStop.mutate({ stopId: stop.id, status: "skipped" })} style={[styles.visitBtn, { backgroundColor: colors.danger+"20" }]}>
+                                  <Feather name="x" size={13} color={colors.danger} />
+                                </TouchableOpacity>
+                                {!!stop.address && Platform.OS !== "web" && (
+                                  <TouchableOpacity onPress={() => Linking.openURL(`https://maps.google.com/?q=${encodeURIComponent(stop.address)}`)} style={[styles.visitBtn, { backgroundColor: colors.primary+"20" }]}>
+                                    <Feather name="navigation" size={13} color={colors.primary} />
+                                  </TouchableOpacity>
+                                )}
+                              </View>
+                            )}
+                            {stop.status !== "pending" && (
+                              <View style={[styles.tag, { backgroundColor: stop.status === "visited" ? colors.success+"20" : colors.danger+"20" }]}>
+                                <Text style={[styles.tagText, { color: stop.status === "visited" ? colors.success : colors.danger }]}>{stop.status === "visited" ? "Визит" : "Пропущен"}</Text>
+                              </View>
+                            )}
+                          </View>
+                        ))}
+                      </View>
+                    );
+                  })}
+              </ScrollView>
+
+              {/* Create Route Modal */}
+              <Modal visible={showCreateRoute} animationType="slide" transparent>
+                <View style={styles.modalOverlay}>
+                  <View style={[styles.modalBox, { backgroundColor: colors.card }]}>
+                    <View style={styles.modalHeader}>
+                      <Text style={[styles.modalTitle, { color: colors.foreground }]}>Новый маршрут</Text>
+                      <TouchableOpacity onPress={() => setShowCreateRoute(false)}><Feather name="x" size={20} color={colors.mutedForeground} /></TouchableOpacity>
+                    </View>
+                    <TextInput placeholder="Название маршрута" placeholderTextColor={colors.mutedForeground} value={newRouteName} onChangeText={setNewRouteName} style={[styles.modalInput, { color: colors.foreground, backgroundColor: colors.muted, borderRadius: 10 }]} />
+                    <Text style={[styles.sectionLabel, { color: colors.mutedForeground }]}>Точки визита</Text>
+                    {newRouteStops.map((stop, i) => (
+                      <View key={i} style={{ gap: 6, marginBottom: 8 }}>
+                        <View style={{ flexDirection: "row", gap: 6 }}>
+                          <TextInput placeholder={`Клиент ${i+1}`} placeholderTextColor={colors.mutedForeground} value={stop.client_name} onChangeText={(v) => setNewRouteStops(prev => prev.map((s,j) => j===i ? {...s,client_name:v} : s))} style={[styles.modalInput, { flex: 1, color: colors.foreground, backgroundColor: colors.muted, borderRadius: 10, marginBottom: 0 }]} />
+                          {newRouteStops.length > 1 && <TouchableOpacity onPress={() => setNewRouteStops(prev => prev.filter((_,j) => j!==i))} style={{ justifyContent: "center" }}><Feather name="trash-2" size={16} color={colors.danger} /></TouchableOpacity>}
+                        </View>
+                        <TextInput placeholder="Адрес" placeholderTextColor={colors.mutedForeground} value={stop.address} onChangeText={(v) => setNewRouteStops(prev => prev.map((s,j) => j===i ? {...s,address:v} : s))} style={[styles.modalInput, { color: colors.foreground, backgroundColor: colors.muted, borderRadius: 10, marginBottom: 0 }]} />
+                      </View>
+                    ))}
+                    <TouchableOpacity onPress={() => setNewRouteStops(prev => [...prev, {client_name:"",address:""}])} style={{ flexDirection: "row", alignItems: "center", gap: 6, marginBottom: 12 }}>
+                      <Feather name="plus-circle" size={16} color={colors.primary} />
+                      <Text style={{ color: colors.primary, fontSize: 13, fontFamily: "Inter_600SemiBold" }}>Добавить точку</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      onPress={() => createRoute.mutate({ date: routeDate, manager_id: user?.id, name: newRouteName, stops: newRouteStops.filter(s => s.client_name) })}
+                      style={[styles.primaryBtn, { backgroundColor: colors.primary }]}
+                      disabled={createRoute.isPending}
+                    >
+                      {createRoute.isPending ? <ActivityIndicator color="#fff" size="small" /> : <Text style={styles.primaryBtnText}>Создать маршрут</Text>}
+                    </TouchableOpacity>
+                  </View>
+                </View>
+              </Modal>
+            </View>
+          )}
+
+          {/* ════════════════════ КЛИЕНТЫ TAB ════════════════════ */}
+          {activeTab === "clients" && (
+            <View style={{ flex: 1 }}>
+              {/* Search + filter */}
+              <View style={[styles.filterRow, { backgroundColor: colors.card, borderBottomColor: colors.border, flexWrap: "wrap", gap: 8 }]}>
+                <View style={[styles.searchBox, { backgroundColor: colors.muted, borderRadius: 10, flex: 1 }]}>
+                  <Feather name="search" size={14} color={colors.mutedForeground} />
+                  <TextInput
+                    placeholder="Поиск клиентов..."
+                    placeholderTextColor={colors.mutedForeground}
+                    value={clientSearch}
+                    onChangeText={setClientSearch}
+                    style={[styles.searchInput, { color: colors.foreground }]}
+                    returnKeyType="search"
+                  />
+                  {!!clientSearch && <TouchableOpacity onPress={() => setClientSearch("")}><Feather name="x" size={14} color={colors.mutedForeground} /></TouchableOpacity>}
+                </View>
+                <TouchableOpacity onPress={() => setShowCreateClient(true)} style={[styles.addBtn, { backgroundColor: colors.primary }]}>
+                  <Feather name="user-plus" size={14} color="#fff" />
+                  <Text style={styles.addBtnText}>Добавить</Text>
+                </TouchableOpacity>
+              </View>
+              <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ maxHeight: 44, backgroundColor: colors.card, borderBottomWidth: 1, borderBottomColor: colors.border }}>
+                <View style={{ flexDirection: "row", alignItems: "center", paddingHorizontal: 12, gap: 8 }}>
+                  {["Все","Розница","Опт","VIP"].map((cat) => (
+                    <TouchableOpacity key={cat} onPress={() => setClientCat(cat)} style={[styles.catChip, { backgroundColor: clientCat === cat ? colors.primary : colors.muted, borderRadius: 20 }]}>
+                      <Text style={[styles.catChipText, { color: clientCat === cat ? "#fff" : colors.mutedForeground }]}>{cat}</Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+              </ScrollView>
+
+              {selectedClient ? (
+                <ScrollView contentContainerStyle={[styles.content, { paddingBottom: 100 }]} showsVerticalScrollIndicator={false}>
+                  <TouchableOpacity onPress={() => setSelectedClient(null)} style={{ flexDirection: "row", alignItems: "center", gap: 6, marginBottom: 4 }}>
+                    <Feather name="arrow-left" size={16} color={colors.primary} />
+                    <Text style={{ color: colors.primary, fontFamily: "Inter_600SemiBold", fontSize: 13 }}>Все клиенты</Text>
+                  </TouchableOpacity>
+                  <View style={[styles.clientDetailCard, { backgroundColor: colors.card, borderRadius: colors.radius, shadowColor: colors.shadow }]}>
+                    <View style={[styles.clientAvatar, { backgroundColor: colors.primary + "20" }]}>
+                      <Text style={{ color: colors.primary, fontSize: 24, fontFamily: "Inter_700Bold" }}>{selectedClient.name.charAt(0)}</Text>
+                    </View>
+                    <Text style={[styles.clientDetailName, { color: colors.foreground }]}>{selectedClient.name}</Text>
+                    <View style={[styles.tag, { backgroundColor: selectedClient.category === "VIP" ? "#f39c1220" : selectedClient.category === "Опт" ? colors.primary+"20" : colors.muted, alignSelf: "center", marginBottom: 12 }]}>
+                      <Text style={[styles.tagText, { color: selectedClient.category === "VIP" ? "#f39c12" : selectedClient.category === "Опт" ? colors.primary : colors.mutedForeground }]}>{selectedClient.category}</Text>
+                    </View>
+                    {[["phone","phone",selectedClient.phone],["map-pin","address",selectedClient.address],["user","contact",selectedClient.contact],["briefcase","manager",selectedClient.manager_name||"—"]].map(([icon,key,val]) => !!val && val !== "—" && (
+                      <TouchableOpacity key={key} onPress={() => key==="phone" && Linking.openURL(`tel:${val}`)} style={styles.clientDetailRow}>
+                        <Feather name={icon as any} size={14} color={colors.mutedForeground} />
+                        <Text style={[styles.clientDetailVal, { color: key==="phone" ? colors.primary : colors.foreground }]}>{val}</Text>
+                      </TouchableOpacity>
+                    ))}
+                    <View style={[styles.clientDetailRow, { marginTop: 8 }]}>
+                      <Feather name="shopping-cart" size={14} color={colors.mutedForeground} />
+                      <Text style={[styles.clientDetailVal, { color: colors.foreground }]}>{selectedClient.order_count} заказов</Text>
+                    </View>
+                  </View>
+                  <Text style={[styles.sectionLabel, { color: colors.mutedForeground, marginBottom: 6 }]}>История заказов</Text>
+                  {(selectedClient as any).orders?.length === 0 ? (
+                    <Text style={{ color: colors.mutedForeground, textAlign: "center", fontSize: 13 }}>Заказов пока нет</Text>
+                  ) : (selectedClient as any).orders?.map((o: Order) => (
+                    <View key={o.id} style={[styles.orderCard, { backgroundColor: colors.card, borderRadius: colors.radius }]}>
+                      <Text style={[styles.orderNum, { color: colors.primary }]}>{o.number}</Text>
+                      <Text style={[styles.orderTotal, { color: colors.foreground }]}>{o.total.toLocaleString()} TJS</Text>
+                      <View style={[styles.tag, { backgroundColor: ORDER_STATUS_COLOR[o.status]?.bg || colors.muted }]}>
+                        <Text style={[styles.tagText, { color: ORDER_STATUS_COLOR[o.status]?.text || colors.mutedForeground }]}>{o.status}</Text>
+                      </View>
+                    </View>
+                  ))}
+                </ScrollView>
+              ) : (
+                <ScrollView contentContainerStyle={[styles.content, { paddingBottom: 100 }]} showsVerticalScrollIndicator={false}>
+                  {loadClients ? <ActivityIndicator color={colors.primary} style={{ marginTop: 24 }} /> :
+                    clients.length === 0 ? (
+                      <View style={{ alignItems: "center", paddingTop: 40, gap: 8 }}>
+                        <Feather name="users" size={40} color={colors.mutedForeground} />
+                        <Text style={{ color: colors.mutedForeground, fontSize: 14 }}>Клиенты не найдены</Text>
+                      </View>
+                    ) : clients.map((client) => (
+                      <TouchableOpacity key={client.id} onPress={async () => {
+                        try { const detail = await apiGet(`/api/clients/${client.id}`); setSelectedClient(detail); } catch { setSelectedClient(client as any); }
+                      }} style={[styles.clientCard, { backgroundColor: colors.card, borderRadius: colors.radius, shadowColor: colors.shadow }]}>
+                        <View style={[styles.clientIcon, { backgroundColor: client.category === "VIP" ? "#f39c1220" : client.category === "Опт" ? colors.primary+"20" : colors.muted }]}>
+                          <Text style={{ color: client.category === "VIP" ? "#f39c12" : client.category === "Опт" ? colors.primary : colors.mutedForeground, fontFamily: "Inter_700Bold", fontSize: 16 }}>{client.name.charAt(0)}</Text>
+                        </View>
+                        <View style={{ flex: 1, gap: 2 }}>
+                          <Text style={[styles.clientName, { color: colors.foreground }]}>{client.name}</Text>
+                          {!!client.phone && <Text style={[styles.clientSub, { color: colors.primary }]}>{client.phone}</Text>}
+                          {!!client.address && <Text style={[styles.clientSub, { color: colors.mutedForeground }]} numberOfLines={1}>{client.address}</Text>}
+                          {client.last_order && <Text style={{ fontSize: 10, color: colors.mutedForeground, fontFamily: "Inter_400Regular" }}>Посл. заказ: {client.last_order.slice(0,10)}</Text>}
+                        </View>
+                        <View style={{ alignItems: "flex-end", gap: 4 }}>
+                          <View style={[styles.tag, { backgroundColor: client.category === "VIP" ? "#f39c1220" : client.category === "Опт" ? colors.primary+"20" : colors.muted }]}>
+                            <Text style={[styles.tagText, { color: client.category === "VIP" ? "#f39c12" : client.category === "Опт" ? colors.primary : colors.mutedForeground }]}>{client.category}</Text>
+                          </View>
+                          {client.order_count > 0 && <Text style={{ fontSize: 10, color: colors.mutedForeground }}>{client.order_count} зак.</Text>}
+                        </View>
+                      </TouchableOpacity>
+                    ))}
+                </ScrollView>
+              )}
+
+              {/* Create Client Modal */}
+              <Modal visible={showCreateClient} animationType="slide" transparent>
+                <View style={styles.modalOverlay}>
+                  <View style={[styles.modalBox, { backgroundColor: colors.card }]}>
+                    <View style={styles.modalHeader}>
+                      <Text style={[styles.modalTitle, { color: colors.foreground }]}>Новый клиент</Text>
+                      <TouchableOpacity onPress={() => setShowCreateClient(false)}><Feather name="x" size={20} color={colors.mutedForeground} /></TouchableOpacity>
+                    </View>
+                    {[["Название *","name"],["Телефон","phone"],["Адрес","address"],["Контактное лицо","contact"],["Примечание","note"]].map(([ph,key]) => (
+                      <TextInput key={key} placeholder={ph} placeholderTextColor={colors.mutedForeground} value={(newClient as any)[key]} onChangeText={(v) => setNewClient(prev => ({...prev,[key]:v}))} style={[styles.modalInput, { color: colors.foreground, backgroundColor: colors.muted, borderRadius: 10 }]} />
+                    ))}
+                    <Text style={[styles.sectionLabel, { color: colors.mutedForeground }]}>Категория</Text>
+                    <View style={{ flexDirection: "row", gap: 8, marginBottom: 16 }}>
+                      {["Розница","Опт","VIP"].map((cat) => (
+                        <TouchableOpacity key={cat} onPress={() => setNewClient(prev => ({...prev,category:cat}))} style={[styles.catChip, { backgroundColor: newClient.category === cat ? colors.primary : colors.muted, borderRadius: 8, flex: 1, justifyContent: "center" }]}>
+                          <Text style={[styles.catChipText, { color: newClient.category === cat ? "#fff" : colors.mutedForeground, textAlign: "center" }]}>{cat}</Text>
+                        </TouchableOpacity>
+                      ))}
+                    </View>
+                    <TouchableOpacity
+                      onPress={() => { if (!newClient.name.trim()) { Alert.alert("Ошибка","Введите название клиента"); return; } createClient.mutate({ ...newClient, manager_id: user?.id }); }}
+                      style={[styles.primaryBtn, { backgroundColor: colors.primary }]}
+                      disabled={createClient.isPending}
+                    >
+                      {createClient.isPending ? <ActivityIndicator color="#fff" size="small" /> : <Text style={styles.primaryBtnText}>Создать клиента</Text>}
+                    </TouchableOpacity>
+                  </View>
+                </View>
+              </Modal>
+            </View>
+          )}
+
+          {/* ════════════════════ ЗАКАЗЫ TAB ════════════════════ */}
+          {activeTab === "orders" && (
+            <View style={{ flex: 1 }}>
+              {/* Status filter + new order button */}
+              <View style={[styles.filterRow, { backgroundColor: colors.card, borderBottomColor: colors.border }]}>
+                <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+                  <View style={{ flexDirection: "row", gap: 8 }}>
+                    {["Все","new","confirmed","in_production","shipped","delivered","cancelled"].map((s) => (
+                      <TouchableOpacity key={s} onPress={() => setOrderStatus(s)} style={[styles.catChip, { backgroundColor: orderStatus === s ? colors.primary : colors.muted, borderRadius: 20 }]}>
+                        <Text style={[styles.catChipText, { color: orderStatus === s ? "#fff" : colors.mutedForeground }]}>{ORDER_STATUS_LABEL[s] || s}</Text>
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+                </ScrollView>
+                <TouchableOpacity onPress={() => setShowCreateOrder(true)} style={[styles.addBtn, { backgroundColor: colors.primary, marginLeft: 8 }]}>
+                  <Feather name="plus" size={14} color="#fff" />
+                  <Text style={styles.addBtnText}>Заказ</Text>
+                </TouchableOpacity>
+              </View>
+
+              <ScrollView contentContainerStyle={[styles.content, { paddingBottom: 100 }]} showsVerticalScrollIndicator={false}>
+                {loadOrders ? <ActivityIndicator color={colors.primary} style={{ marginTop: 24 }} /> :
+                  orders.length === 0 ? (
+                    <View style={{ alignItems: "center", paddingTop: 40, gap: 8 }}>
+                      <Feather name="shopping-cart" size={40} color={colors.mutedForeground} />
+                      <Text style={{ color: colors.mutedForeground, fontSize: 14 }}>Заказов пока нет</Text>
+                      <TouchableOpacity onPress={() => setShowCreateOrder(true)} style={[styles.addBtn, { backgroundColor: colors.primary, alignSelf: "center" }]}>
+                        <Feather name="plus" size={14} color="#fff" />
+                        <Text style={styles.addBtnText}>Создать заказ</Text>
+                      </TouchableOpacity>
+                    </View>
+                  ) : orders.map((order) => {
+                    const expanded = expandedOrder === order.id;
+                    const sc = ORDER_STATUS_COLOR[order.status] || { bg: colors.muted, text: colors.mutedForeground };
+                    return (
+                      <View key={order.id} style={[styles.orderCardFull, { backgroundColor: colors.card, borderRadius: colors.radius, shadowColor: colors.shadow }]}>
+                        <TouchableOpacity onPress={() => setExpandedOrder(expanded ? null : order.id)} style={styles.orderCardHeader}>
+                          <View style={{ flex: 1 }}>
+                            <Text style={[styles.orderNum, { color: colors.primary, fontSize: 14 }]}>{order.number}</Text>
+                            <Text style={[styles.clientName, { color: colors.foreground, fontSize: 13 }]}>{order.client_name || "Клиент не указан"}</Text>
+                            <Text style={{ fontSize: 11, color: colors.mutedForeground, fontFamily: "Inter_400Regular" }}>{order.created_at?.slice(0,10)} · {order.manager_name || "—"}</Text>
+                          </View>
+                          <View style={{ alignItems: "flex-end", gap: 4 }}>
+                            <Text style={[styles.orderTotal, { color: colors.foreground }]}>{order.total.toLocaleString()} TJS</Text>
+                            <View style={[styles.tag, { backgroundColor: sc.bg }]}><Text style={[styles.tagText, { color: sc.text }]}>{ORDER_STATUS_LABEL[order.status] || order.status}</Text></View>
+                          </View>
+                          <Feather name={expanded ? "chevron-up" : "chevron-down"} size={16} color={colors.mutedForeground} style={{ marginLeft: 8 }} />
+                        </TouchableOpacity>
+                        {expanded && (
+                          <View style={{ borderTopWidth: 1, borderTopColor: colors.border, paddingTop: 10, gap: 6 }}>
+                            {order.items.map((item, i) => (
+                              <View key={i} style={{ flexDirection: "row", justifyContent: "space-between" }}>
+                                <Text style={{ flex: 1, color: colors.foreground, fontSize: 12, fontFamily: "Inter_400Regular" }}>{item.product_name} × {item.qty}</Text>
+                                <Text style={{ color: colors.mutedForeground, fontSize: 12, fontFamily: "Inter_500Medium" }}>{item.total.toLocaleString()} TJS</Text>
+                              </View>
+                            ))}
+                            {can("sales.manage") && (
+                              <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginTop: 8 }}>
+                                <View style={{ flexDirection: "row", gap: 6 }}>
+                                  {["confirmed","in_production","shipped","delivered","cancelled"].map((s) => (
+                                    <TouchableOpacity key={s} onPress={() => updateOrderStatus.mutate({ orderId: order.id, status: s })}
+                                      style={[styles.catChip, { backgroundColor: ORDER_STATUS_COLOR[s]?.bg || colors.muted, borderRadius: 8 }]}>
+                                      <Text style={[styles.catChipText, { color: ORDER_STATUS_COLOR[s]?.text || colors.mutedForeground }]}>{ORDER_STATUS_LABEL[s]}</Text>
+                                    </TouchableOpacity>
+                                  ))}
+                                </View>
+                              </ScrollView>
+                            )}
+                          </View>
+                        )}
+                      </View>
+                    );
+                  })}
+              </ScrollView>
+
+              {/* Create Order Modal */}
+              <Modal visible={showCreateOrder} animationType="slide" transparent>
+                <View style={styles.modalOverlay}>
+                  <KeyboardAvoidingView style={{ flex: 1, justifyContent: "flex-end" }} behavior={Platform.OS === "ios" ? "padding" : undefined}>
+                    <View style={[styles.modalBoxLg, { backgroundColor: colors.card }]}>
+                      <View style={styles.modalHeader}>
+                        <Text style={[styles.modalTitle, { color: colors.foreground }]}>Новый заказ</Text>
+                        <TouchableOpacity onPress={() => { setShowCreateOrder(false); setCart([]); setOrderClient({id:null,name:""}); setOrderNote(""); }}><Feather name="x" size={20} color={colors.mutedForeground} /></TouchableOpacity>
+                      </View>
+                      <ScrollView showsVerticalScrollIndicator={false} style={{ maxHeight: 480 }}>
+                        {/* Client selection */}
+                        <Text style={[styles.sectionLabel, { color: colors.mutedForeground }]}>Клиент</Text>
+                        <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginBottom: 12 }}>
+                          <View style={{ flexDirection: "row", gap: 8 }}>
+                            {clients.slice(0, 10).map((c) => (
+                              <TouchableOpacity key={c.id} onPress={() => setOrderClient({id:c.id,name:c.name})}
+                                style={[styles.catChip, { backgroundColor: orderClient.id === c.id ? colors.primary : colors.muted, borderRadius: 8, maxWidth: 140 }]}>
+                                <Text style={[styles.catChipText, { color: orderClient.id === c.id ? "#fff" : colors.foreground }]} numberOfLines={1}>{c.name}</Text>
+                              </TouchableOpacity>
+                            ))}
+                            <TextInput placeholder="Другой клиент..." placeholderTextColor={colors.mutedForeground} value={orderClient.id === null ? orderClient.name : ""} onChangeText={(v) => setOrderClient({id:null,name:v})} style={[styles.catChip, { color: colors.foreground, backgroundColor: colors.muted, borderRadius: 8, minWidth: 120 }]} />
+                          </View>
+                        </ScrollView>
+
+                        {/* Product picker */}
+                        <Text style={[styles.sectionLabel, { color: colors.mutedForeground }]}>Товары со склада</Text>
+                        {warehouse.slice(0, 20).map((item) => {
+                          const cartEntry = cart.find(c => c.product_name === item.name);
+                          const qty = cartEntry?.qty || 0;
+                          return (
+                            <View key={item.id} style={[styles.productRow, { borderBottomColor: colors.border }]}>
+                              <View style={{ flex: 1 }}>
+                                <Text style={[styles.productName, { color: colors.foreground }]}>{item.name}</Text>
+                                <Text style={[styles.productCat, { color: colors.mutedForeground }]}>{item.category} · Скл: {item.qty}</Text>
+                              </View>
+                              <View style={styles.qtyRow}>
+                                <TouchableOpacity onPress={() => {
+                                  if (qty <= 1) setCart(prev => prev.filter(c => c.product_name !== item.name));
+                                  else setCart(prev => prev.map(c => c.product_name === item.name ? {...c, qty: c.qty-1, total:(c.qty-1)*c.price} : c));
+                                }} style={[styles.qtyBtn, { backgroundColor: qty > 0 ? colors.danger+"20" : colors.muted }]} disabled={qty === 0}>
+                                  <Feather name="minus" size={12} color={qty > 0 ? colors.danger : colors.mutedForeground} />
+                                </TouchableOpacity>
+                                <Text style={[styles.qtyVal, { color: qty > 0 ? colors.foreground : colors.mutedForeground }]}>{qty}</Text>
+                                <TouchableOpacity onPress={() => {
+                                  if (qty === 0) setCart(prev => [...prev, { product_name:item.name, category:item.category, qty:1, price:0 }]);
+                                  else setCart(prev => prev.map(c => c.product_name === item.name ? {...c, qty: c.qty+1} : c));
+                                }} style={[styles.qtyBtn, { backgroundColor: colors.primary+"20" }]}>
+                                  <Feather name="plus" size={12} color={colors.primary} />
+                                </TouchableOpacity>
+                              </View>
+                            </View>
+                          );
+                        })}
+
+                        <TextInput placeholder="Примечание к заказу..." placeholderTextColor={colors.mutedForeground} value={orderNote} onChangeText={setOrderNote} style={[styles.modalInput, { color: colors.foreground, backgroundColor: colors.muted, borderRadius: 10, marginTop: 8 }]} />
+                      </ScrollView>
+
+                      {/* Cart summary + submit */}
+                      <View style={[styles.cartSummary, { borderTopColor: colors.border }]}>
+                        <View>
+                          <Text style={{ color: colors.mutedForeground, fontSize: 12, fontFamily: "Inter_400Regular" }}>{cart.length} позиций в корзине</Text>
+                          <Text style={{ color: colors.foreground, fontSize: 16, fontFamily: "Inter_700Bold" }}>
+                            {cart.reduce((s,c) => s + c.qty*c.price, 0).toLocaleString()} TJS
+                          </Text>
+                        </View>
+                        <TouchableOpacity
+                          onPress={() => {
+                            if (!orderClient.name && !orderClient.id) { Alert.alert("Ошибка","Выберите клиента"); return; }
+                            if (cart.length === 0) { Alert.alert("Ошибка","Добавьте хотя бы один товар"); return; }
+                            createOrder.mutate({ client_id: orderClient.id, client_name: orderClient.name, manager_id: user?.id, note: orderNote, items: cart });
+                          }}
+                          style={[styles.primaryBtn, { backgroundColor: colors.primary, flex: 1, marginLeft: 12 }]}
+                          disabled={createOrder.isPending}
+                        >
+                          {createOrder.isPending ? <ActivityIndicator color="#fff" size="small" /> : <Text style={styles.primaryBtnText}>Оформить заказ</Text>}
+                        </TouchableOpacity>
+                      </View>
+                    </View>
+                  </KeyboardAvoidingView>
+                </View>
+              </Modal>
+            </View>
+          )}
         </>
       )}
     </View>
   );
 }
+
+const ORDER_STATUS_LABEL: Record<string, string> = {
+  Все: "Все", new: "Новый", confirmed: "Подтверждён", in_production: "В работе",
+  shipped: "Отгружен", delivered: "Доставлен", cancelled: "Отменён",
+};
+const ORDER_STATUS_COLOR: Record<string, { bg: string; text: string }> = {
+  new:           { bg: "#3498db20", text: "#3498db" },
+  confirmed:     { bg: "#27ae6020", text: "#27ae60" },
+  in_production: { bg: "#f39c1220", text: "#f39c12" },
+  shipped:       { bg: "#9b59b620", text: "#9b59b6" },
+  delivered:     { bg: "#1abc9c20", text: "#1abc9c" },
+  cancelled:     { bg: "#e74c3c20", text: "#e74c3c" },
+};
 
 const styles = StyleSheet.create({
   container: { flex: 1 },
@@ -861,4 +1422,59 @@ const styles = StyleSheet.create({
   factorIcon: { width: 28, height: 28, borderRadius: 7, alignItems: "center", justifyContent: "center" },
   factorName: { flex: 1, fontSize: 13, fontFamily: "Inter_500Medium" },
   factorImpact: { fontSize: 12, fontFamily: "Inter_600SemiBold" },
+  tag: { paddingHorizontal: 8, paddingVertical: 3, borderRadius: 12 },
+  tagText: { fontSize: 11, fontFamily: "Inter_600SemiBold" },
+  sectionLabel: { fontSize: 12, fontFamily: "Inter_600SemiBold", marginBottom: 4 },
+  // ── Route ──
+  filterRow: { flexDirection: "row", alignItems: "center", paddingHorizontal: 12, paddingVertical: 10, gap: 8, borderBottomWidth: 1 },
+  dateArrow: { padding: 4 },
+  dateText: { fontSize: 14, fontFamily: "Inter_600SemiBold" },
+  todayBtn: { paddingHorizontal: 8, paddingVertical: 4 },
+  addBtn: { flexDirection: "row", alignItems: "center", gap: 5, paddingHorizontal: 12, paddingVertical: 7, borderRadius: 10 },
+  addBtnText: { color: "#fff", fontSize: 12, fontFamily: "Inter_600SemiBold" },
+  routeCard: { padding: 14, gap: 0, shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.06, shadowRadius: 8, elevation: 2 },
+  routeHeader: { flexDirection: "row", alignItems: "center", gap: 8, marginBottom: 10 },
+  routeTitle: { fontSize: 15, fontFamily: "Inter_700Bold" },
+  routeSub: { fontSize: 12, fontFamily: "Inter_400Regular" },
+  stopRow: { flexDirection: "row", alignItems: "center", gap: 10, paddingVertical: 10, borderTopWidth: 1 },
+  stopDot: { width: 10, height: 10, borderRadius: 5 },
+  stopName: { fontSize: 13, fontFamily: "Inter_600SemiBold" },
+  stopAddr: { fontSize: 11, fontFamily: "Inter_400Regular" },
+  visitBtn: { width: 30, height: 30, borderRadius: 8, alignItems: "center", justifyContent: "center" },
+  // ── Clients ──
+  searchBox: { flexDirection: "row", alignItems: "center", paddingHorizontal: 10, paddingVertical: 8, gap: 8 },
+  searchInput: { flex: 1, fontSize: 13, fontFamily: "Inter_400Regular", padding: 0 },
+  catChip: { paddingHorizontal: 12, paddingVertical: 6, flexDirection: "row", alignItems: "center" },
+  catChipText: { fontSize: 12, fontFamily: "Inter_600SemiBold" },
+  clientCard: { flexDirection: "row", alignItems: "center", gap: 12, padding: 14, shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.06, shadowRadius: 8, elevation: 2 },
+  clientIcon: { width: 44, height: 44, borderRadius: 22, alignItems: "center", justifyContent: "center" },
+  clientName: { fontSize: 14, fontFamily: "Inter_600SemiBold" },
+  clientSub: { fontSize: 12, fontFamily: "Inter_400Regular" },
+  clientDetailCard: { padding: 20, alignItems: "center", gap: 8, shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.06, shadowRadius: 8, elevation: 2, marginBottom: 12 },
+  clientAvatar: { width: 72, height: 72, borderRadius: 36, alignItems: "center", justifyContent: "center", marginBottom: 4 },
+  clientDetailName: { fontSize: 18, fontFamily: "Inter_700Bold", textAlign: "center" },
+  clientDetailRow: { flexDirection: "row", alignItems: "center", gap: 10, width: "100%" },
+  clientDetailVal: { flex: 1, fontSize: 13, fontFamily: "Inter_500Medium" },
+  // ── Orders ──
+  orderCard: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", padding: 10, gap: 8 },
+  orderCardFull: { shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.06, shadowRadius: 8, elevation: 2, overflow: "hidden" },
+  orderCardHeader: { flexDirection: "row", alignItems: "center", padding: 14, gap: 8 },
+  orderNum: { fontSize: 12, fontFamily: "Inter_700Bold" },
+  orderTotal: { fontSize: 14, fontFamily: "Inter_700Bold" },
+  productRow: { flexDirection: "row", alignItems: "center", paddingVertical: 10, borderBottomWidth: 1, gap: 10 },
+  productName: { fontSize: 13, fontFamily: "Inter_600SemiBold" },
+  productCat: { fontSize: 11, fontFamily: "Inter_400Regular" },
+  qtyRow: { flexDirection: "row", alignItems: "center", gap: 8 },
+  qtyBtn: { width: 28, height: 28, borderRadius: 8, alignItems: "center", justifyContent: "center" },
+  qtyVal: { fontSize: 14, fontFamily: "Inter_700Bold", minWidth: 18, textAlign: "center" },
+  // ── Modals ──
+  modalOverlay: { flex: 1, backgroundColor: "rgba(0,0,0,0.4)", justifyContent: "flex-end" },
+  modalBox: { borderTopLeftRadius: 20, borderTopRightRadius: 20, padding: 20, maxHeight: "80%", gap: 0 },
+  modalBoxLg: { borderTopLeftRadius: 20, borderTopRightRadius: 20, padding: 20, maxHeight: "90%" },
+  modalHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 16 },
+  modalTitle: { fontSize: 18, fontFamily: "Inter_700Bold" },
+  modalInput: { padding: 12, fontSize: 13, fontFamily: "Inter_400Regular", marginBottom: 10 },
+  primaryBtn: { padding: 14, borderRadius: 12, alignItems: "center", justifyContent: "center", flexDirection: "row" },
+  primaryBtnText: { color: "#fff", fontSize: 15, fontFamily: "Inter_700Bold" },
+  cartSummary: { flexDirection: "row", alignItems: "center", paddingTop: 14, marginTop: 12, borderTopWidth: 1, gap: 0 },
 });

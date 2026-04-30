@@ -317,6 +317,69 @@ def init_db():
     );
     CREATE INDEX IF NOT EXISTS idx_rko_date   ON rko(date);
     CREATE INDEX IF NOT EXISTS idx_rko_status ON rko(status);
+
+    -- ── Клиенты ──────────────────────────────────────────────────────
+    CREATE TABLE IF NOT EXISTS clients (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        name        TEXT    NOT NULL,
+        phone       TEXT    DEFAULT '',
+        address     TEXT    DEFAULT '',
+        contact     TEXT    DEFAULT '',
+        category    TEXT    DEFAULT 'Розница',
+        status      TEXT    DEFAULT 'active',
+        manager_id  INTEGER,
+        note        TEXT    DEFAULT '',
+        created_at  TEXT    DEFAULT (datetime('now')),
+        updated_at  TEXT    DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_clients_name ON clients(name);
+
+    -- ── Маршруты ─────────────────────────────────────────────────────
+    CREATE TABLE IF NOT EXISTS routes (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        date        TEXT    NOT NULL,
+        manager_id  INTEGER,
+        name        TEXT    DEFAULT '',
+        status      TEXT    DEFAULT 'active',
+        created_at  TEXT    DEFAULT (datetime('now'))
+    );
+    CREATE TABLE IF NOT EXISTS route_stops (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        route_id    INTEGER NOT NULL,
+        client_id   INTEGER,
+        client_name TEXT    DEFAULT '',
+        address     TEXT    DEFAULT '',
+        order_num   INTEGER DEFAULT 0,
+        status      TEXT    DEFAULT 'pending',
+        note        TEXT    DEFAULT '',
+        visit_time  TEXT    DEFAULT ''
+    );
+    CREATE INDEX IF NOT EXISTS idx_routes_date ON routes(date);
+
+    -- ── Заказы ───────────────────────────────────────────────────────
+    CREATE TABLE IF NOT EXISTS orders (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        number      TEXT    NOT NULL,
+        client_id   INTEGER,
+        client_name TEXT    DEFAULT '',
+        manager_id  INTEGER,
+        total       REAL    DEFAULT 0,
+        status      TEXT    DEFAULT 'new',
+        note        TEXT    DEFAULT '',
+        created_at  TEXT    DEFAULT (datetime('now')),
+        updated_at  TEXT    DEFAULT (datetime('now'))
+    );
+    CREATE TABLE IF NOT EXISTS order_items (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        order_id     INTEGER NOT NULL,
+        product_name TEXT    DEFAULT '',
+        category     TEXT    DEFAULT '',
+        qty          INTEGER DEFAULT 1,
+        price        REAL    DEFAULT 0,
+        total        REAL    DEFAULT 0
+    );
+    CREATE INDEX IF NOT EXISTS idx_orders_client ON orders(client_id);
+    CREATE INDEX IF NOT EXISTS idx_orders_mgr    ON orders(manager_id);
     """)
     db.commit()
     # ── Миграции (добавляем колонки если их нет) ───────────────────────
@@ -405,6 +468,26 @@ def _seed_demo(db):
             "INSERT OR IGNORE INTO employees(id,name,role,color,bg,is_hr,is_admin,salary) VALUES(?,?,?,?,?,?,?,?)",
             employees,
         )
+
+    # ── Клиенты (демо) ────────────────────────────────────────────────────
+    if not db.execute("SELECT 1 FROM clients LIMIT 1").fetchone():
+        demo_clients = [
+            ("ООО «Интерьер-Плюс»",     "+992 37 221 0011", "Душанбе, ул. Рудаки 45",     "Алишер",    "Опт",    8),
+            ("ТЦ Галерея",              "+992 37 227 1234", "Душанбе, пр. Исмоила Сомони","Камол",     "VIP",    13),
+            ("Отель «Душанбе»",         "+992 37 233 5555", "Душанбе, ул. Шотемур 22",    "Нилуфар",   "VIP",    11),
+            ("Магазин «Уют»",           "+992 93 500 1122", "Душанбе, ц. рынок Корвон",   "Файзулло",  "Розница",9),
+            ("ООО «Строй-Сервис»",      "+992 98 700 3344", "Вахдат, ул. Ленина 8",       "Рустам",    "Опт",    8),
+            ("Жилой комплекс «Новый»",  "+992 92 800 6677", "Душанбе, мкр. Зарафшон",     "Дилноза",   "VIP",    11),
+            ("ЧП Рахимов",              "+992 93 111 2233", "Душанбе, ул. Айни 33",       "Рахим",     "Розница",9),
+            ("Офис-Центр «Бизнес»",     "+992 37 224 9900", "Душанбе, ул. Бохтар 12",     "Санам",     "Опт",    22),
+            ("Санаторий «Варзоб»",      "+992 37 235 7788", "Варзоб, ул. Центральная 1",  "Муродали",  "Розница",14),
+            ("ООО «ДушМебель»",         "+992 98 600 5566", "Душанбе, ТЦ Вахдат",         "Хуршед",    "Опт",    24),
+        ]
+        for c in demo_clients:
+            db.execute(
+                "INSERT INTO clients(name,phone,address,contact,category,manager_id) VALUES(?,?,?,?,?,?)",
+                c
+            )
 
     # ── Офис ──────────────────────────────────────────────────────────────
     if not db.execute("SELECT 1 FROM offices LIMIT 1").fetchone():
@@ -535,6 +618,49 @@ class SalesPlanUpdate(BaseModel):
     manager_id: int
     period: str
     amount: float
+
+class ClientCreate(BaseModel):
+    name: str
+    phone: str = ""
+    address: str = ""
+    contact: str = ""
+    category: str = "Розница"
+    manager_id: Optional[int] = None
+    note: str = ""
+
+class RouteStopIn(BaseModel):
+    client_id: Optional[int] = None
+    client_name: str = ""
+    address: str = ""
+    order_num: int = 0
+    note: str = ""
+
+class RouteCreate(BaseModel):
+    date: str
+    manager_id: Optional[int] = None
+    name: str = ""
+    stops: List[RouteStopIn] = []
+
+class StopVisit(BaseModel):
+    status: str
+    note: str = ""
+    visit_time: str = ""
+
+class OrderItemIn(BaseModel):
+    product_name: str
+    category: str = ""
+    qty: int = 1
+    price: float = 0
+
+class OrderCreate(BaseModel):
+    client_id: Optional[int] = None
+    client_name: str = ""
+    manager_id: Optional[int] = None
+    note: str = ""
+    items: List[OrderItemIn] = []
+
+class OrderStatusUpdate(BaseModel):
+    status: str
 
 class EmployeeCreate(BaseModel):
     id: int
@@ -1345,6 +1471,188 @@ def get_sales_history(
     rows = rows_to_list(db.execute(q, params).fetchall())
     db.close()
     return rows
+
+# ══════════════════════════════════════════════════════════════════════
+# КЛИЕНТЫ
+# ══════════════════════════════════════════════════════════════════════
+@app.get("/api/clients", tags=["clients"])
+def get_clients(search: Optional[str] = Query(None), category: Optional[str] = Query(None)):
+    db = get_db()
+    q = """SELECT c.*, e.name as manager_name,
+               (SELECT COUNT(*) FROM orders o WHERE o.client_id=c.id) as order_count,
+               (SELECT MAX(o.created_at) FROM orders o WHERE o.client_id=c.id) as last_order
+           FROM clients c LEFT JOIN employees e ON c.manager_id=e.id"""
+    params, wheres = [], []
+    if search:   wheres.append("(c.name LIKE ? OR c.phone LIKE ? OR c.address LIKE ?)"); params += [f"%{search}%"]*3
+    if category and category != "Все": wheres.append("c.category=?"); params.append(category)
+    if wheres: q += " WHERE " + " AND ".join(wheres)
+    q += " ORDER BY c.name"
+    rows = rows_to_list(db.execute(q, params).fetchall())
+    db.close()
+    return rows
+
+@app.get("/api/clients/{client_id}", tags=["clients"])
+def get_client(client_id: int):
+    db = get_db()
+    client = db.execute(
+        "SELECT c.*, e.name as manager_name FROM clients c LEFT JOIN employees e ON c.manager_id=e.id WHERE c.id=?",
+        (client_id,)
+    ).fetchone()
+    if not client:
+        db.close()
+        raise HTTPException(404, "Клиент не найден")
+    orders = rows_to_list(db.execute(
+        "SELECT * FROM orders WHERE client_id=? ORDER BY created_at DESC LIMIT 20", (client_id,)
+    ).fetchall())
+    result = dict(client)
+    result["orders"] = orders
+    db.close()
+    return result
+
+@app.post("/api/clients", tags=["clients"])
+async def create_client(c: ClientCreate):
+    db = get_db()
+    cur = db.execute(
+        "INSERT INTO clients(name,phone,address,contact,category,manager_id,note) VALUES(?,?,?,?,?,?,?)",
+        (c.name, c.phone, c.address, c.contact, c.category, c.manager_id, c.note)
+    )
+    db.commit()
+    new_id = cur.lastrowid
+    db.close()
+    await ws_manager.broadcast("client_created", {"id": new_id, "name": c.name})
+    return {"ok": True, "id": new_id}
+
+@app.put("/api/clients/{client_id}", tags=["clients"])
+async def update_client(client_id: int, c: ClientCreate):
+    db = get_db()
+    db.execute(
+        "UPDATE clients SET name=?,phone=?,address=?,contact=?,category=?,manager_id=?,note=?,updated_at=datetime('now') WHERE id=?",
+        (c.name, c.phone, c.address, c.contact, c.category, c.manager_id, c.note, client_id)
+    )
+    db.commit()
+    db.close()
+    return {"ok": True}
+
+# ══════════════════════════════════════════════════════════════════════
+# МАРШРУТЫ
+# ══════════════════════════════════════════════════════════════════════
+@app.get("/api/routes", tags=["routes"])
+def get_routes(route_date: Optional[str] = Query(None), manager_id: Optional[int] = Query(None)):
+    db = get_db()
+    today = date.today().isoformat()
+    filter_date = route_date or today
+    q = """SELECT r.*, e.name as manager_name FROM routes r
+           LEFT JOIN employees e ON r.manager_id=e.id WHERE r.date=?"""
+    params: list = [filter_date]
+    if manager_id: q += " AND r.manager_id=?"; params.append(manager_id)
+    routes = rows_to_list(db.execute(q, params).fetchall())
+    for route in routes:
+        stops = rows_to_list(db.execute(
+            "SELECT * FROM route_stops WHERE route_id=? ORDER BY order_num", (route["id"],)
+        ).fetchall())
+        route["stops"] = stops
+    db.close()
+    return routes
+
+@app.post("/api/routes", tags=["routes"])
+async def create_route(r: RouteCreate):
+    db = get_db()
+    cur = db.execute(
+        "INSERT INTO routes(date,manager_id,name) VALUES(?,?,?)",
+        (r.date, r.manager_id, r.name)
+    )
+    route_id = cur.lastrowid
+    for idx, s in enumerate(r.stops):
+        db.execute(
+            "INSERT INTO route_stops(route_id,client_id,client_name,address,order_num,note) VALUES(?,?,?,?,?,?)",
+            (route_id, s.client_id, s.client_name, s.address, idx, s.note)
+        )
+    db.commit()
+    db.close()
+    await ws_manager.broadcast("route_created", {"id": route_id})
+    return {"ok": True, "id": route_id}
+
+@app.put("/api/routes/stops/{stop_id}/visit", tags=["routes"])
+async def update_stop(stop_id: int, v: StopVisit):
+    db = get_db()
+    db.execute(
+        "UPDATE route_stops SET status=?,note=?,visit_time=? WHERE id=?",
+        (v.status, v.note, v.visit_time or datetime.now().strftime("%H:%M"), stop_id)
+    )
+    db.commit()
+    db.close()
+    return {"ok": True}
+
+@app.delete("/api/routes/{route_id}", tags=["routes"])
+async def delete_route(route_id: int):
+    db = get_db()
+    db.execute("DELETE FROM route_stops WHERE route_id=?", (route_id,))
+    db.execute("DELETE FROM routes WHERE id=?", (route_id,))
+    db.commit()
+    db.close()
+    return {"ok": True}
+
+# ══════════════════════════════════════════════════════════════════════
+# ЗАКАЗЫ
+# ══════════════════════════════════════════════════════════════════════
+@app.get("/api/orders", tags=["orders"])
+def get_orders(status: Optional[str] = Query(None), manager_id: Optional[int] = Query(None), client_id: Optional[int] = Query(None)):
+    db = get_db()
+    q = """SELECT o.*, e.name as manager_name FROM orders o
+           LEFT JOIN employees e ON o.manager_id=e.id"""
+    params, wheres = [], []
+    if status and status != "Все": wheres.append("o.status=?"); params.append(status)
+    if manager_id: wheres.append("o.manager_id=?"); params.append(manager_id)
+    if client_id:  wheres.append("o.client_id=?");  params.append(client_id)
+    if wheres: q += " WHERE " + " AND ".join(wheres)
+    q += " ORDER BY o.created_at DESC"
+    orders = rows_to_list(db.execute(q, params).fetchall())
+    for order in orders:
+        order["items"] = rows_to_list(db.execute(
+            "SELECT * FROM order_items WHERE order_id=?", (order["id"],)
+        ).fetchall())
+    db.close()
+    return orders
+
+@app.post("/api/orders", tags=["orders"])
+async def create_order(o: OrderCreate):
+    db = get_db()
+    total = sum(item.qty * item.price for item in o.items)
+    count = db.execute("SELECT COUNT(*) FROM orders").fetchone()[0]
+    number = f"ПТ-{count + 1:04d}"
+    cur = db.execute(
+        "INSERT INTO orders(number,client_id,client_name,manager_id,total,note) VALUES(?,?,?,?,?,?)",
+        (number, o.client_id, o.client_name, o.manager_id, total, o.note)
+    )
+    order_id = cur.lastrowid
+    for item in o.items:
+        item_total = item.qty * item.price
+        db.execute(
+            "INSERT INTO order_items(order_id,product_name,category,qty,price,total) VALUES(?,?,?,?,?,?)",
+            (order_id, item.product_name, item.category, item.qty, item.price, item_total)
+        )
+    db.commit()
+    db.close()
+    await ws_manager.broadcast("order_created", {"id": order_id, "number": number, "total": total})
+    return {"ok": True, "id": order_id, "number": number, "total": total}
+
+@app.put("/api/orders/{order_id}/status", tags=["orders"])
+async def update_order_status(order_id: int, s: OrderStatusUpdate):
+    db = get_db()
+    db.execute("UPDATE orders SET status=?,updated_at=datetime('now') WHERE id=?", (s.status, order_id))
+    db.commit()
+    db.close()
+    await ws_manager.broadcast("order_updated", {"id": order_id, "status": s.status})
+    return {"ok": True}
+
+@app.delete("/api/orders/{order_id}", tags=["orders"])
+async def delete_order(order_id: int):
+    db = get_db()
+    db.execute("DELETE FROM order_items WHERE order_id=?", (order_id,))
+    db.execute("DELETE FROM orders WHERE id=?", (order_id,))
+    db.commit()
+    db.close()
+    return {"ok": True}
 
 # ══════════════════════════════════════════════════════════════════════
 # KPI И СТАТИСТИКА
