@@ -267,6 +267,17 @@ def init_db():
         active      INTEGER DEFAULT 1
     );
 
+    -- ── Геолокации сотрудников (real-time) ──────────────────────────
+    CREATE TABLE IF NOT EXISTS employee_locations (
+        emp_id      INTEGER PRIMARY KEY,
+        lat         REAL    NOT NULL,
+        lng         REAL    NOT NULL,
+        accuracy    REAL    DEFAULT 0,
+        updated_at  TEXT    DEFAULT (datetime('now')),
+        FOREIGN KEY(emp_id) REFERENCES employees(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_geoloc_emp ON employee_locations(emp_id);
+
     -- ── Настройки ───────────────────────────────────────────────────
     CREATE TABLE IF NOT EXISTS settings (
         key     TEXT PRIMARY KEY,
@@ -480,6 +491,12 @@ class AttendanceCheckIn(BaseModel):
     emp_id: int
     lat: float
     lng: float
+
+class GeoUpdate(BaseModel):
+    emp_id: int
+    lat: float
+    lng: float
+    accuracy: float = 0.0
 
 class RkoCreate(BaseModel):
     number: Optional[str] = None
@@ -945,6 +962,93 @@ async def attendance_checkin(body: AttendanceCheckIn):
     db.close()
     await ws_manager.broadcast("attendance_updated", rec)
     return {"action": action, "record": rec, "distance_m": round(nearest_dist), "in_zone": in_zone}
+
+# ── Геолокации сотрудников (real-time) ───────────────────────────────
+
+@app.post("/api/geo/update", tags=["geo"])
+async def geo_update(body: GeoUpdate):
+    """Обновить текущее местоположение сотрудника."""
+    db = get_db()
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    db.execute("""
+        INSERT INTO employee_locations(emp_id, lat, lng, accuracy, updated_at)
+        VALUES(?, ?, ?, ?, ?)
+        ON CONFLICT(emp_id) DO UPDATE SET
+            lat=excluded.lat, lng=excluded.lng,
+            accuracy=excluded.accuracy, updated_at=excluded.updated_at
+    """, (body.emp_id, body.lat, body.lng, body.accuracy, now_str))
+    db.commit()
+
+    offices = rows_to_list(db.execute("SELECT * FROM offices WHERE active=1").fetchall())
+    db.close()
+
+    nearest_dist = 999999
+    in_zone = False
+    for o in offices:
+        d = haversine_m(body.lat, body.lng, o["lat"], o["lng"])
+        if d < nearest_dist:
+            nearest_dist = d
+        if d <= o["radius"]:
+            in_zone = True
+
+    result = {
+        "emp_id": body.emp_id,
+        "lat": body.lat,
+        "lng": body.lng,
+        "distance_m": round(nearest_dist),
+        "in_zone": in_zone,
+        "updated_at": now_str,
+    }
+    await ws_manager.broadcast("geo_updated", result)
+    return result
+
+@app.get("/api/geo/all", tags=["geo"])
+async def geo_get_all():
+    """Получить геолокации всех сотрудников с признаком нахождения в зоне."""
+    db = get_db()
+    locs = rows_to_list(db.execute("""
+        SELECT el.emp_id, el.lat, el.lng, el.accuracy, el.updated_at,
+               e.name, e.role, e.color, e.bg
+        FROM employee_locations el
+        JOIN employees e ON e.id = el.emp_id
+    """).fetchall())
+    offices = rows_to_list(db.execute("SELECT * FROM offices WHERE active=1").fetchall())
+    db.close()
+
+    now = datetime.now()
+    result = []
+    for loc in locs:
+        nearest_dist = 999999
+        in_zone = False
+        for o in offices:
+            d = haversine_m(loc["lat"], loc["lng"], o["lat"], o["lng"])
+            if d < nearest_dist:
+                nearest_dist = d
+            if d <= o["radius"]:
+                in_zone = True
+        try:
+            updated = datetime.strptime(loc["updated_at"], "%Y-%m-%d %H:%M:%S")
+            seconds_ago = int((now - updated).total_seconds())
+        except Exception:
+            seconds_ago = 9999
+        result.append({
+            **loc,
+            "distance_m": round(nearest_dist),
+            "in_zone": in_zone,
+            "seconds_ago": seconds_ago,
+            "is_online": seconds_ago < 120,
+        })
+    return result
+
+@app.delete("/api/geo/{emp_id}", tags=["geo"])
+async def geo_delete(emp_id: int):
+    """Удалить геолокацию сотрудника."""
+    db = get_db()
+    db.execute("DELETE FROM employee_locations WHERE emp_id=?", (emp_id,))
+    db.commit()
+    db.close()
+    await ws_manager.broadcast("geo_deleted", {"emp_id": emp_id})
+    return {"ok": True, "emp_id": emp_id}
 
 # ══════════════════════════════════════════════════════════════════════
 # РКО — Расходный кассовый ордер

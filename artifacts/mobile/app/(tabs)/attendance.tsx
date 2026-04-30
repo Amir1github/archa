@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useCallback } from "react";
+import React, { useState, useMemo, useCallback, useEffect, useRef } from "react";
 import {
   View, Text, ScrollView, StyleSheet, TouchableOpacity,
   ActivityIndicator, RefreshControl, Platform, Linking, Alert, TextInput,
@@ -56,6 +56,7 @@ export default function AttendanceScreen() {
   const [workStart, setWorkStart] = useState("09:00");
   const [workEnd, setWorkEnd] = useState("18:00");
   const [savingSettings, setSavingSettings] = useState(false);
+  const geoIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const { data: attendance = [], isLoading: loadAtt, refetch } = useQuery<Attendance[]>({
     queryKey: ["attendance", date],
@@ -79,6 +80,51 @@ export default function AttendanceScreen() {
     enabled: activeTab === "map" || activeTab === "settings",
     staleTime: 15 * 60 * 1000,
   });
+
+  interface EmpLocation {
+    emp_id: number; lat: number; lng: number; accuracy: number;
+    updated_at: string; name: string; role: string; color: string; bg: string;
+    distance_m: number; in_zone: boolean; seconds_ago: number; is_online: boolean;
+  }
+  const { data: empLocations = [], refetch: refetchGeo } = useQuery<EmpLocation[]>({
+    queryKey: ["geo-all"],
+    queryFn: () => apiGet("/api/geo/all"),
+    enabled: activeTab === "map",
+    refetchInterval: activeTab === "map" ? 15_000 : false,
+    staleTime: 10_000,
+  });
+
+  const pushGeo = useCallback(async () => {
+    if (!user) return;
+    try {
+      const { status } = await Location.requestForegroundPermissionsAsync();
+      if (status !== "granted") return;
+      const loc = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
+      await apiPost("/api/geo/update", {
+        emp_id: user.id,
+        lat: loc.coords.latitude,
+        lng: loc.coords.longitude,
+        accuracy: loc.coords.accuracy || 0,
+      });
+    } catch { }
+  }, [user]);
+
+  useEffect(() => {
+    if (!user) return;
+    pushGeo();
+    geoIntervalRef.current = setInterval(pushGeo, 30_000);
+    return () => { if (geoIntervalRef.current) clearInterval(geoIntervalRef.current); };
+  }, [user, pushGeo]);
+
+  const handleDeleteGeo = useCallback(async (empId: number, empName: string) => {
+    Alert.alert("Удалить геолокацию?", empName, [
+      { text: "Отмена", style: "cancel" },
+      { text: "Удалить", style: "destructive", onPress: async () => {
+        await apiDelete(`/api/geo/${empId}`);
+        refetchGeo();
+      }},
+    ]);
+  }, [refetchGeo]);
 
   const myRecord = useMemo(() => {
     if (!user) return null;
@@ -190,6 +236,41 @@ export default function AttendanceScreen() {
 
   const topPad = Platform.OS === "web" ? 67 : insets.top;
   const isLoading = loadAtt || loadEmp;
+
+  const buildLeafletHtml = useCallback((locs: typeof empLocations, offs: typeof offices): string => {
+    const empMarkers = locs.map((loc) => {
+      const color = loc.in_zone ? "#10b981" : (loc.is_online ? "#f59e0b" : "#9ca3af");
+      const label = `${loc.name} (${loc.role})<br/>${loc.in_zone ? "✅ В офисе" : "❌ Не в офисе"}<br/>${loc.distance_m} м до офиса<br/>${loc.seconds_ago < 60 ? "только что" : `${Math.round(loc.seconds_ago / 60)} мин. назад`}`;
+      return `L.circleMarker([${loc.lat}, ${loc.lng}], {radius:12, color:"${color}", fillColor:"${color}", fillOpacity:0.85, weight:2}).addTo(map).bindPopup("${label.replace(/"/g, "'")}").bindTooltip("${loc.name.split(" ")[0]}", {permanent:true, direction:"top", offset:[0,-8], className:"emp-label"})`;
+    }).join(";\n");
+
+    const offCircles = offs.map((o) =>
+      `L.circle([${o.lat}, ${o.lng}], {radius:${o.radius}, color:"#3b82f6", fillColor:"#3b82f6", fillOpacity:0.08, weight:2, dashArray:"6"}).addTo(map).bindPopup("${o.name} · ${o.radius}м"); L.circleMarker([${o.lat}, ${o.lng}], {radius:8, color:"#3b82f6", fillColor:"#3b82f6", fillOpacity:1, weight:2}).addTo(map).bindTooltip("🏢 ${o.name}", {permanent:true, direction:"top", offset:[0,-8]})`
+    ).join(";\n");
+
+    const allLats = [...locs.map((l) => l.lat), ...offs.map((o) => o.lat)];
+    const allLngs = [...locs.map((l) => l.lng), ...offs.map((o) => o.lng)];
+    const centerLat = allLats.length ? allLats.reduce((a, b) => a + b, 0) / allLats.length : 38.5597;
+    const centerLng = allLngs.length ? allLngs.reduce((a, b) => a + b, 0) / allLngs.length : 68.7738;
+
+    return `<!DOCTYPE html><html><head>
+<meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<style>html,body,#map{margin:0;padding:0;height:100%;width:100%}
+.emp-label{background:none;border:none;box-shadow:none;font-size:11px;font-weight:600;color:#111;white-space:nowrap}
+</style></head><body>
+<div id="map"></div>
+<script>
+var map = L.map('map').setView([${centerLat}, ${centerLng}], 15);
+L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{attribution:'© OSM',maxZoom:19}).addTo(map);
+${offCircles}
+${empMarkers}
+${allLats.length > 1 ? `try{map.fitBounds([[${Math.min(...allLats) - 0.002},${Math.min(...allLngs) - 0.002}],[${Math.max(...allLats) + 0.002},${Math.max(...allLngs) + 0.002}]])}catch(e){}` : ""}
+</script></body></html>`;
+  }, []);
+
+  const leafletHtml = useMemo(() => buildLeafletHtml(empLocations, offices), [empLocations, offices, buildLeafletHtml]);
 
   const prevDay = () => { const d = new Date(date); d.setDate(d.getDate() - 1); setDate(d.toISOString().split("T")[0]); };
   const nextDay = () => { const d = new Date(date); d.setDate(d.getDate() + 1); if (d <= new Date()) setDate(d.toISOString().split("T")[0]); };
@@ -385,52 +466,106 @@ export default function AttendanceScreen() {
       )}
 
       {activeTab === "map" && (
-        <ScrollView contentContainerStyle={styles.list} showsVerticalScrollIndicator={false}>
-          <Text style={[styles.sectionTitle, { color: colors.mutedForeground, marginBottom: 4 }]}>Офисы и геолокации</Text>
-          {loadOffices ? <ActivityIndicator color={colors.primary} style={{ marginTop: 20 }} /> : offices.length === 0 ? (
-            <EmptyState icon="map-pin" title="Офисы не настроены" subtitle="Добавьте офисы в настройках" />
-          ) : offices.map((office) => (
-            <View key={office.id} style={[styles.officeCard, { backgroundColor: colors.card, borderRadius: colors.radius, shadowColor: colors.shadow }]}>
-              <View style={styles.officeHeader}>
-                <View style={[styles.officeIcon, { backgroundColor: colors.primary + "20" }]}>
-                  <Feather name="map-pin" size={20} color={colors.primary} />
-                </View>
-                <View style={{ flex: 1 }}>
-                  <Text style={[styles.officeName, { color: colors.foreground }]}>{office.name}</Text>
-                  <Text style={[styles.officeCoords, { color: colors.mutedForeground }]}>
-                    {office.lat.toFixed(4)}° N, {office.lng.toFixed(4)}° E
-                  </Text>
-                </View>
-                <View style={[styles.tag, { backgroundColor: office.active ? colors.success + "20" : colors.muted }]}>
-                  <Text style={[styles.tagText, { color: office.active ? colors.success : colors.mutedForeground }]}>
-                    {office.active ? "Активен" : "Неактивен"}
-                  </Text>
-                </View>
-              </View>
-              <View style={[styles.officeInfo, { borderTopColor: colors.border }]}>
-                <Feather name="circle" size={13} color={colors.mutedForeground} />
-                <Text style={[styles.officeRadius, { color: colors.mutedForeground }]}>Радиус: {office.radius} м</Text>
-              </View>
-              {Platform.OS === "web" ? (
-                <View style={[styles.mapEmbed, { borderRadius: colors.radius / 2, overflow: "hidden" }]}>
-                  <iframe
-                    src={`https://www.openstreetmap.org/export/embed.html?bbox=${office.lng - 0.01}%2C${office.lat - 0.01}%2C${office.lng + 0.01}%2C${office.lat + 0.01}&layer=mapnik&marker=${office.lat}%2C${office.lng}`}
-                    style={{ border: 0, width: "100%", height: 200 }}
-                    title={office.name}
-                  />
+        <View style={{ flex: 1 }}>
+          {/* Leaflet map — full width on web, offline visual on mobile */}
+          {Platform.OS === "web" ? (
+            <View style={{ height: 340, borderBottomWidth: 1, borderBottomColor: colors.border }}>
+              {(loadOffices || offices.length === 0) ? (
+                <View style={{ flex: 1, alignItems: "center", justifyContent: "center", backgroundColor: colors.muted }}>
+                  {loadOffices ? <ActivityIndicator color={colors.primary} /> : <Text style={{ color: colors.mutedForeground }}>Добавьте офис в Настройках</Text>}
                 </View>
               ) : (
-                <TouchableOpacity
-                  style={[styles.mapBtn, { backgroundColor: colors.primary, borderRadius: colors.radius / 2 }]}
-                  onPress={() => Linking.openURL(`https://maps.google.com/?q=${office.lat},${office.lng}`)}
-                >
-                  <Feather name="external-link" size={14} color="#fff" />
-                  <Text style={styles.mapBtnText}>Открыть в картах</Text>
-                </TouchableOpacity>
+                <iframe
+                  srcDoc={leafletHtml}
+                  style={{ border: 0, width: "100%", height: "100%" }}
+                  title="Карта сотрудников"
+                />
               )}
+              {/* Live refresh button */}
+              <TouchableOpacity onPress={() => refetchGeo()}
+                style={{ position: "absolute", bottom: 10, right: 10, backgroundColor: colors.card, borderRadius: 20, padding: 8, shadowColor: "#000", shadowOpacity: 0.15, shadowRadius: 4, elevation: 4, flexDirection: "row", alignItems: "center", gap: 6, borderWidth: 1, borderColor: colors.border }}>
+                <Feather name="refresh-cw" size={14} color={colors.primary} />
+                <Text style={{ color: colors.primary, fontSize: 12, fontFamily: "Inter_600SemiBold" }}>Обновить</Text>
+              </TouchableOpacity>
             </View>
-          ))}
-        </ScrollView>
+          ) : (
+            <View style={{ backgroundColor: colors.muted, height: 180, alignItems: "center", justifyContent: "center", gap: 8, borderBottomWidth: 1, borderBottomColor: colors.border }}>
+              <View style={{ flexDirection: "row", flexWrap: "wrap", justifyContent: "center", gap: 8, paddingHorizontal: 16 }}>
+                {offices.slice(0, 3).map((o) => (
+                  <TouchableOpacity key={o.id} onPress={() => Linking.openURL(`https://maps.google.com/?q=${o.lat},${o.lng}`)}
+                    style={{ backgroundColor: colors.primary + "15", borderRadius: 8, paddingHorizontal: 12, paddingVertical: 6, flexDirection: "row", alignItems: "center", gap: 6 }}>
+                    <Feather name="map-pin" size={13} color={colors.primary} />
+                    <Text style={{ color: colors.primary, fontSize: 12, fontFamily: "Inter_600SemiBold" }}>{o.name}</Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+              <Text style={{ color: colors.mutedForeground, fontSize: 12 }}>Нажмите на офис для открытия карты</Text>
+            </View>
+          )}
+
+          {/* Summary stats row */}
+          <View style={[styles.statsRow, { backgroundColor: colors.card, borderBottomColor: colors.border }]}>
+            <StatCard label="В офисе" value={empLocations.filter((l) => l.in_zone).length} color={colors.success} />
+            <View style={[styles.statDiv, { backgroundColor: colors.border }]} />
+            <StatCard label="Вне офиса" value={empLocations.filter((l) => !l.in_zone).length} color={colors.danger} />
+            <View style={[styles.statDiv, { backgroundColor: colors.border }]} />
+            <StatCard label="Онлайн" value={empLocations.filter((l) => l.is_online).length} color={colors.primary} />
+            <View style={[styles.statDiv, { backgroundColor: colors.border }]} />
+            <StatCard label="Всего" value={employees.length} color={colors.mutedForeground} />
+          </View>
+
+          {/* Employee geo list */}
+          <ScrollView contentContainerStyle={[styles.list, { paddingBottom: 100 }]} showsVerticalScrollIndicator={false}
+            refreshControl={<RefreshControl refreshing={false} onRefresh={refetchGeo} />}
+          >
+            {employees.map((emp) => {
+              const geo = empLocations.find((l) => l.emp_id === emp.id);
+              const inZone = geo?.in_zone ?? false;
+              const isOnline = geo?.is_online ?? false;
+              const statusColor = !geo ? colors.mutedForeground : inZone ? colors.success : colors.danger;
+              const statusLabel = !geo ? "Нет данных" : inZone ? "В офисе" : "Вне офиса";
+              const secsAgo = geo?.seconds_ago ?? null;
+              return (
+                <View key={emp.id} style={[styles.card, { backgroundColor: colors.card, borderRadius: colors.radius, shadowColor: colors.shadow, borderLeftWidth: 3, borderLeftColor: statusColor }]}>
+                  <View style={styles.cardLeft}>
+                    <View style={{ position: "relative" }}>
+                      <View style={[styles.avatar, { backgroundColor: emp.bg || colors.muted }]}>
+                        <Text style={[styles.avatarText, { color: emp.color }]}>{emp.name.charAt(0)}</Text>
+                      </View>
+                      <View style={{ position: "absolute", bottom: 0, right: 0, width: 10, height: 10, borderRadius: 5, backgroundColor: isOnline ? colors.success : colors.mutedForeground, borderWidth: 1.5, borderColor: colors.card }} />
+                    </View>
+                    <View style={styles.empInfo}>
+                      <Text style={[styles.empName, { color: colors.foreground }]}>{emp.name}</Text>
+                      <Text style={[styles.empRole, { color: colors.mutedForeground }]}>{emp.role}</Text>
+                      {geo && (
+                        <Text style={{ fontSize: 11, color: colors.mutedForeground, fontFamily: "Inter_400Regular" }}>
+                          {secsAgo !== null && secsAgo < 60 ? "только что" : secsAgo !== null ? `${Math.round(secsAgo / 60)} мин. назад` : ""} · {geo.distance_m} м
+                        </Text>
+                      )}
+                    </View>
+                  </View>
+                  <View style={{ alignItems: "flex-end", gap: 6 }}>
+                    <View style={[styles.tag, { backgroundColor: statusColor + "20" }]}>
+                      <Text style={[styles.tagText, { color: statusColor }]}>{statusLabel}</Text>
+                    </View>
+                    {geo && can("hr.manage") && (
+                      <TouchableOpacity onPress={() => handleDeleteGeo(emp.id, emp.name)}>
+                        <Feather name="x-circle" size={16} color={colors.mutedForeground} />
+                      </TouchableOpacity>
+                    )}
+                  </View>
+                </View>
+              );
+            })}
+            {empLocations.length === 0 && (
+              <View style={{ paddingTop: 24, alignItems: "center", gap: 8 }}>
+                <Feather name="wifi-off" size={36} color={colors.mutedForeground} />
+                <Text style={{ color: colors.mutedForeground, fontSize: 14 }}>Геоданные пока не поступали</Text>
+                <Text style={{ color: colors.mutedForeground, fontSize: 12, textAlign: "center", paddingHorizontal: 32 }}>Данные появятся после того, как сотрудники откроют приложение</Text>
+              </View>
+            )}
+          </ScrollView>
+        </View>
       )}
 
       {activeTab === "settings" && (
