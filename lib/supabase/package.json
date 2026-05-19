@@ -1,0 +1,16 @@
+{
+  "name": "@workspace/supabase",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.49.8"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:",
+    "typescript": "~5.9.2"
+  }
+}

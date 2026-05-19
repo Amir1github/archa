@@ -1,0 +1,44 @@
+[build]
+  command = "corepack pnpm install --ignore-scripts && corepack pnpm --filter @workspace/mobile run build"
+  publish = "artifacts/mobile/dist"
+  functions = "netlify/functions"
+
+[build.environment]
+  NODE_VERSION = "22"
+
+# Серверные эндпоинты (секреты, 1С, AI)
+[[redirects]]
+  from = "/api/auth/login"
+  to = "/.netlify/functions/auth-login"
+  status = 200
+
+[[redirects]]
+  from = "/api/ai-chat"
+  to = "/.netlify/functions/ai-chat"
+  status = 200
+
+[[redirects]]
+  from = "/api/export/csv"
+  to = "/.netlify/functions/export-csv"
+  status = 200
+
+[[redirects]]
+  from = "/api/sync/*"
+  to = "/.netlify/functions/sync-1c/:splat"
+  status = 200
+
+# SPA (Expo Router web) — последним
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200
+
+[functions]
+  node_bundler = "esbuild"
+  directory = "netlify/functions"
+
+[functions."ai-chat"]
+  timeout = 26
+
+[functions."sync-1c"]
+  timeout = 26
