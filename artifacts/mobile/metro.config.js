@@ -6,12 +6,12 @@ const monorepoRoot = path.resolve(projectRoot, "../..");
 
 const config = getDefaultConfig(projectRoot);
 
-// pnpm workspace: резолв @workspace/* из корня монорепо
+// Монорепо: Metro видит workspace-пакеты (@workspace/supabase и т.д.)
 config.watchFolders = [monorepoRoot];
 config.resolver.nodeModulesPaths = [
   path.resolve(projectRoot, "node_modules"),
   path.resolve(monorepoRoot, "node_modules"),
 ];
-config.resolver.disableHierarchicalLookup = true;
+// Не включаем disableHierarchicalLookup — с pnpm ломает @expo/metro-runtime
 
 module.exports = config;
