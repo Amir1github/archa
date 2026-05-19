@@ -175,7 +175,12 @@ export default function LoginScreen() {
   const [busy, setBusy] = useState(false);
   const shakeAnim = useRef(new Animated.Value(0)).current;
 
-  const { data: employees = [], isLoading: empsLoading } = useQuery<Employee[]>({
+  const {
+    data: employees = [],
+    isLoading: empsLoading,
+    isError: empsError,
+    error: empsErr,
+  } = useQuery<Employee[]>({
     queryKey: ["employees"],
     queryFn: () => apiGet("/api/employees"),
     staleTime: 1000 * 60,
@@ -302,6 +307,21 @@ export default function LoginScreen() {
               style={{ marginTop: 40 }}
               color={colors.primary}
             />
+          ) : empsError ? (
+            <Text style={[styles.emptyHint, { color: "#c0392b" }]}>
+              Ошибка загрузки:{" "}
+              {empsErr instanceof Error ? empsErr.message : "сеть"}
+            </Text>
+          ) : employees.length === 0 ? (
+            <View style={styles.emptyBox}>
+              <Text style={[styles.emptyHint, { color: colors.mutedForeground }]}>
+                Сотрудники не найдены в базе Supabase.
+              </Text>
+              <Text style={[styles.emptyHint, { color: colors.mutedForeground }]}>
+                В SQL Editor выполните файлы из папки supabase/migrations/
+                (особенно 20250519000001 и 20250519000002).
+              </Text>
+            </View>
           ) : (
             <FlatList
               data={employees}
@@ -446,6 +466,12 @@ const styles = StyleSheet.create({
     paddingHorizontal: 24,
     marginTop: 16,
     marginBottom: 12,
+  },
+  emptyBox: { paddingHorizontal: 24, paddingTop: 8, gap: 8 },
+  emptyHint: {
+    fontSize: 14,
+    fontFamily: "Inter_400Regular",
+    lineHeight: 20,
   },
 
   empGrid: { paddingHorizontal: 16, paddingBottom: 32 },

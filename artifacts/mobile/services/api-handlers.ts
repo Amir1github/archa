@@ -67,6 +67,14 @@ export async function handleApiGet<T>(path: string): Promise<T> {
   const sb = getSupabase();
 
   if (base === "/api/employees") {
+    const { data: rpcData, error: rpcError } = await sb.rpc(
+      "get_employees_for_login",
+    );
+    if (!rpcError && rpcData && Array.isArray(rpcData) && rpcData.length > 0) {
+      return (rpcData as Record<string, unknown>[]).map((e) =>
+        normalizeEmployee(e),
+      ) as T;
+    }
     const { data, error } = await sb.from("employees").select("*").order("id");
     if (error) throw new Error(error.message);
     return (data ?? []).map((e) => normalizeEmployee(e as Record<string, unknown>)) as T;
