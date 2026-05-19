@@ -3,4 +3,4 @@ export {
   employeeAuthEmail,
   employeeAuthPassword,
   stripEmployeePin,
-} from "./client.js";
+} from "./client";
