@@ -1,4 +1,4 @@
-import { getServiceSupabase, jsonResponse, parseBody } from "./_shared.js";
+import { getServiceSupabase, jsonResponse, parseBody } from "./lib/shared.js";
 
 interface ChatMessage {
   role: string;

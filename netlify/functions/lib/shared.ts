@@ -39,9 +39,9 @@ export function employeeAuthPassword(empId: number, pin: string): string {
   return `Pt_${p}_${empId}!`;
 }
 
-export function stripEmployeePin<T extends { pin?: string | null; auth_user_id?: string | null }>(
-  emp: T,
-): Omit<T, "pin" | "auth_user_id"> & { pin?: string | null } {
+export function stripEmployeePin<
+  T extends { pin?: string | null; auth_user_id?: string | null },
+>(emp: T): Omit<T, "pin" | "auth_user_id"> & { pin?: string | null } {
   const result = { ...emp };
   if (result.pin) {
     (result as { pin?: string | null }).pin = "*";

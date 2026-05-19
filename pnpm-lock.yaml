@@ -153,6 +153,10 @@ overrides:
 importers:
 
   .:
+    dependencies:
+      '@supabase/supabase-js':
+        specifier: ^2.49.8
+        version: 2.106.0
     devDependencies:
       netlify-cli:
         specifier: ^23.4.3

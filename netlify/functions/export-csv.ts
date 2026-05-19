@@ -1,4 +1,4 @@
-import { getServiceSupabase } from "./_shared.js";
+import { getServiceSupabase } from "./lib/shared.js";
 
 const ALLOWED = new Set([
   "attendance",

@@ -5,7 +5,7 @@ import {
   jsonResponse,
   parseBody,
   stripEmployeePin,
-} from "./_shared.js";
+} from "./lib/shared.js";
 
 interface LoginBody {
   emp_id: number;
